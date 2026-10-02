@@ -1,0 +1,149 @@
+diff --git a/crates/client/src/lib.rs b/crates/client/src/lib.rs
+index c1b9881..62df4e0 100644
+--- a/crates/client/src/lib.rs
++++ b/crates/client/src/lib.rs
+@@ -67,7 +67,39 @@ pub fn parse_account_value(v: &[u8]) -> Option<AccountValue> {
+ /// 10 MiB default trips exactly when a server is catching up.
+ const MAX_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
+ 
++/// Timing and size of one `lookup` (both attempts when it retried through a
++/// manifest refresh). Filled by `lookup`; read `PirClient::last_metrics`.
++#[derive(Clone, Debug, Default)]
++pub struct LookupMetrics {
++    /// Client CPU: building the two PIR queries.
++    pub query_build_us: u64,
++    /// POST sent until response headers arrive (network + server compute).
++    pub http_us: u64,
++    /// Reading the response body (dominated by sidecar size when large).
++    pub body_us: u64,
++    /// Client CPU: decrypting both buckets and picking the answer.
++    pub decode_us: u64,
++    /// Bytes on the wire, request body.
++    pub req_bytes: u64,
++    /// Bytes on the wire, response body.
++    pub resp_bytes: u64,
++    /// Part of `resp_bytes` that is the sidecar broadcast JSON.
++    pub sidecar_bytes: u64,
++    pub sidecar_entries: u64,
++    pub stash_entries: u64,
++    pub snapshot_block: u64,
++    /// "sidecar", "snapshot", "stash" or "miss".
++    pub source: &'static str,
++    /// True when the first attempt hit a reconfiguration and was retried.
++    pub retried: bool,
++}
++
+ pub struct PirClient {
++    /// Metrics of the most recent `lookup` / `lookup_address`.
++    pub last_metrics: LookupMetrics,
++    /// Bench experiment: with PIR_CLIENT_REUSE=1, lookups share one agent (one
++    /// kept-alive connection) instead of a new connection per lookup.
++    agent: Option<ureq::Agent>,
+     base: String,
+     pub manifest: Manifest,
+     params: Params,
+@@ -83,6 +115,8 @@ impl PirClient {
+         let base = base.trim_end_matches('/').to_string();
+         let (manifest, params, hasher) = Self::fetch_manifest(&base)?;
+         Ok(PirClient {
++            last_metrics: LookupMetrics::default(),
++            agent: (std::env::var("PIR_CLIENT_REUSE").as_deref() == Ok("1")).then(ureq::Agent::new_with_defaults),
+             base,
+             manifest,
+             params,
+@@ -145,9 +179,11 @@ impl PirClient {
+     }
+ 
+     pub fn lookup(&mut self, key: &[u8]) -> Result<Option<Lookup>, String> {
++        self.last_metrics = LookupMetrics::default();
+         match self.lookup_once(key)? {
+             LookupOutcome::Done(r) => Ok(r),
+             LookupOutcome::Reconfigured => {
++                self.last_metrics.retried = true;
+                 self.refresh()?;
+                 match self.lookup_once(key)? {
+                     LookupOutcome::Done(r) => Ok(r),
+@@ -160,6 +196,7 @@ impl PirClient {
+     }
+ 
+     fn lookup_once(&mut self, key: &[u8]) -> Result<LookupOutcome, String> {
++        let t_build = std::time::Instant::now();
+         // Build both queries (fresh secret each), concurrently.
+         let [p0, p1] = self.hasher.positions_2(key);
+         let (q0, q1) = std::thread::scope(|s| {
+@@ -170,8 +207,16 @@ impl PirClient {
+         let (q0, q1) = (q0?, q1?);
+         let mut body = pack_query(&self.params, &q0.flat)?;
+         body.extend_from_slice(&pack_query(&self.params, &q1.flat)?);
++        self.last_metrics.query_build_us += t_build.elapsed().as_micros() as u64;
++        self.last_metrics.req_bytes += body.len() as u64;
+ 
+-        let mut resp = ureq::post(&format!("{}/lookup", self.base))
++        let t_http = std::time::Instant::now();
++        let url = format!("{}/lookup", self.base);
++        let req = match &self.agent {
++            Some(a) => a.post(&url),
++            None => ureq::post(&url),
++        };
++        let mut resp = req
+             .send(&body[..])
+             .map_err(|e| format!("lookup failed: {}", e))?;
+         let stamp = resp
+@@ -180,15 +225,20 @@ impl PirClient {
+             .and_then(|v| v.to_str().ok())
+             .unwrap_or("")
+             .to_string();
++        self.last_metrics.http_us += t_http.elapsed().as_micros() as u64;
+         if stamp.split(':').nth(1) != Some(self.manifest.config_fp().as_str()) {
+             return Ok(LookupOutcome::Reconfigured);
+         }
++        let t_body = std::time::Instant::now();
+         let bytes = resp
+             .body_mut()
+             .with_config()
+             .limit(MAX_RESPONSE_BYTES)
+             .read_to_vec()
+             .map_err(|e| e.to_string())?;
++        self.last_metrics.body_us += t_body.elapsed().as_micros() as u64;
++        self.last_metrics.resp_bytes += bytes.len() as u64;
++        let t_decode = std::time::Instant::now();
+ 
+         // [4B LE json length][SidecarBroadcast JSON][response 0][response 1]
+         let rb = self.params.response_compressed_bytes();
+@@ -216,6 +266,12 @@ impl PirClient {
+         let b1 = unpack_bytes(&q1.extract_compressed(&self.params, r1)?, bucket_bytes);
+ 
+         self.last_snapshot_block = sc.snapshot_block;
++        let m = &mut self.last_metrics;
++        m.sidecar_bytes = json_len as u64;
++        m.sidecar_entries = sc.entries.len() as u64;
++        m.stash_entries = sc.stash.len() as u64;
++        m.snapshot_block = sc.snapshot_block;
++        m.decode_us += t_decode.elapsed().as_micros() as u64;
+ 
+         // Pick locally: freshest sidecar entry, else either bucket's
+         // matching cell, else the stash — all describing one snapshot.
+@@ -225,6 +281,7 @@ impl PirClient {
+             .rev()
+             .find(|e| hex::decode(&e.address_hex).as_deref() == Ok(key))
+         {
++            self.last_metrics.source = "sidecar";
+             return Ok(LookupOutcome::Done(Some(Lookup {
+                 value: hex::decode(&e.value_hex).map_err(|x| x.to_string())?,
+                 source: Source::Sidecar { block: e.block },
+@@ -233,6 +290,7 @@ impl PirClient {
+         let mut found = self
+             .match_cell(&b0, key)
+             .or_else(|| self.match_cell(&b1, key));
++        self.last_metrics.source = if found.is_some() { "snapshot" } else { "miss" };
+         if found.is_none() {
+             if let Some(e) = sc
+                 .stash
+@@ -240,6 +298,7 @@ impl PirClient {
+                 .find(|e| hex::decode(&e.address_hex).as_deref() == Ok(key))
+             {
+                 found = Some(hex::decode(&e.value_hex).map_err(|x| x.to_string())?);
++                self.last_metrics.source = "stash";
+             }
+         }
+         Ok(LookupOutcome::Done(found.map(|value| Lookup {

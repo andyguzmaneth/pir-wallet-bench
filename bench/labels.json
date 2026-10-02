@@ -1,0 +1,186 @@
+{
+ "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e": {
+  "kind": "ens",
+  "name": "ENS registry"
+ },
+ "0x0000000000696760e15f265e828db644a0c242eb": {
+  "kind": "names",
+  "name": "WNS name NFT"
+ },
+ "0x07687e702b410fa43f4cb4af7fa097918ffd2730": {
+  "kind": "privacy",
+  "name": "Tornado DAI 10k"
+ },
+ "0x0836222f2b2b24a3f36f98668ed8f0b38d1a872f": {
+  "kind": "privacy",
+  "name": "Tornado USDT 1k"
+ },
+ "0x12d66f87a04a9e220743712ce6d9bb1b5616b8fc": {
+  "kind": "privacy",
+  "name": "Tornado ETH 0.1"
+ },
+ "0x169ad27a470d064dede56a2d3ff727986b15d52b": {
+  "kind": "privacy",
+  "name": "Tornado USDT 100"
+ },
+ "0x178169b423a011fff22b9e3f3abea13414ddd0f1": {
+  "kind": "privacy",
+  "name": "Tornado WBTC 0.1"
+ },
+ "0x1f98431c8ad98523631ae4a59f267346ea31f984": {
+  "kind": "dex",
+  "name": "Uniswap V3 factory"
+ },
+ "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": {
+  "kind": "erc20",
+  "name": "WBTC"
+ },
+ "0x23773e65ed146a459791799d01336db287f25334": {
+  "kind": "privacy",
+  "name": "Tornado DAI 100k"
+ },
+ "0x253553366da8546fc250f225fe3d25d0c782303b": {
+  "kind": "ens",
+  "name": "ENS registrar controller"
+ },
+ "0x4337084d9e255ff0702461cf8895ce9e3b5ff108": {
+  "kind": "aa",
+  "name": "ERC-4337 entrypoint v0.8"
+ },
+ "0x4736dcf1b7a3d580672cce6e7c65cd5cc9cfba9d": {
+  "kind": "privacy",
+  "name": "Tornado USDC 1k"
+ },
+ "0x47ce0c6ed5b0ce3d3a51fdb1c52dc66a7c3c2936": {
+  "kind": "privacy",
+  "name": "Tornado ETH 1"
+ },
+ "0x4c9edd5852cd905f086c759e8383e09bff1e68b3": {
+  "kind": "erc20",
+  "name": "USDe"
+ },
+ "0x55649e01b5df198d18d95b5cc5051630cfd45564": {
+  "kind": "stealth",
+  "name": "ERC-5564 announcer"
+ },
+ "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85": {
+  "kind": "ens",
+  "name": "ENS base registrar"
+ },
+ "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f": {
+  "kind": "dex",
+  "name": "Uniswap V2 factory"
+ },
+ "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419": {
+  "kind": "oracle",
+  "name": "Chainlink ETH/USD"
+ },
+ "0x610b717796ad172b316836ac95a2ffad065ceab4": {
+  "kind": "privacy",
+  "name": "Tornado WBTC 1"
+ },
+ "0x6538e6bf4b0ebd30a8ea093027ac2422ce5d6538": {
+  "kind": "stealth",
+  "name": "ERC-6538 registry"
+ },
+ "0x6818809eefce719e480a7526d76bd3e561526b46": {
+  "kind": "privacy",
+  "name": "Privacy Pools entrypoint"
+ },
+ "0x6b175474e89094c44da98b954eedeac495271d0f": {
+  "kind": "erc20",
+  "name": "DAI"
+ },
+ "0x6c3ea9036406852006290770bedfcaba0e23a0e8": {
+  "kind": "erc20",
+  "name": "PYUSD"
+ },
+ "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0": {
+  "kind": "erc20",
+  "name": "wstETH"
+ },
+ "0x853d955acef822db058eb8505911ed77f175b99e": {
+  "kind": "erc20",
+  "name": "FRAX"
+ },
+ "0x910cbd523d972eb0a6f4cae4618ad62622b39dbf": {
+  "kind": "privacy",
+  "name": "Tornado ETH 10"
+ },
+ "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6": {
+  "kind": "names",
+  "name": "GNS name NFT"
+ },
+ "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+  "kind": "erc20",
+  "name": "USDC"
+ },
+ "0xa160cdab225685da1d56aa342ad8841c3b53f291": {
+  "kind": "privacy",
+  "name": "Tornado ETH 100"
+ },
+ "0xa58e81fe9b61b5c3fe2afd33cf304c454abfc7cb": {
+  "kind": "ens",
+  "name": "ENS reverse registrar"
+ },
+ "0xb20c66c4de72433f3ce747b58b86830c459ca911": {
+  "kind": "privacy",
+  "name": "Tornado instance registry"
+ },
+ "0xbb93e510bbcd0b7beb5a853875f9ec60275cf498": {
+  "kind": "privacy",
+  "name": "Tornado WBTC 10"
+ },
+ "0xbbda2173cdfea1c3bd7f2908798f1265301d750c": {
+  "kind": "privacy",
+  "name": "Privacy Pools pool B"
+ },
+ "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+  "kind": "erc20",
+  "name": "WETH"
+ },
+ "0xca11bde05977b3631167028862be2a173976ca11": {
+  "kind": "multicall",
+  "name": "Multicall3"
+ },
+ "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401": {
+  "kind": "ens",
+  "name": "ENS name wrapper"
+ },
+ "0xd4b88df4d29f5cedd6857912842cff3b20c8cfa3": {
+  "kind": "privacy",
+  "name": "Tornado DAI 100"
+ },
+ "0xd96f2b1c14db8458374d9aca76e26c3d18364307": {
+  "kind": "privacy",
+  "name": "Tornado USDC 100"
+ },
+ "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+  "kind": "erc20",
+  "name": "USDT"
+ },
+ "0xdc035d45d973e3ec169d2276ddab16f1e407384f": {
+  "kind": "erc20",
+  "name": "USDS"
+ },
+ "0xeeeeeeee14d718c2b47d9923deab1335e144eeee": {
+  "kind": "ens",
+  "name": "ENS universal resolver"
+ },
+ "0xf241d57c6debae225c0f2e6ea1529373c9a9c9fb": {
+  "kind": "privacy",
+  "name": "Privacy Pools pool A"
+ },
+ "0xf29100983e058b709f3d539b0c765937b804ac15": {
+  "kind": "ens",
+  "name": "ENS public resolver"
+ },
+ "0xfa7093cdd9ee6932b4eb2c9e1cde7ce00b1fa4b9": {
+  "kind": "privacy",
+  "name": "Railgun proxy"
+ },
+ "0xfd8610d20aa15b7b2e3be39b396a1bc3516c7144": {
+  "kind": "privacy",
+  "name": "Tornado DAI 1k"
+ }
+}

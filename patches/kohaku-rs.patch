@@ -1,0 +1,127 @@
+diff --git a/crates/pir-provider/src/lookup.rs b/crates/pir-provider/src/lookup.rs
+index f8e9cf4..83c50bb 100644
+--- a/crates/pir-provider/src/lookup.rs
++++ b/crates/pir-provider/src/lookup.rs
+@@ -15,6 +15,19 @@ pub trait LookupBackend: Send + Sync {
+     ///
+     /// Returns [`PirProviderError::Client`] when the lookup fails.
+     fn lookup(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PirProviderError>;
++
++    /// Like [`Self::lookup`], plus backend-specific metrics (timings, bytes)
++    /// as JSON. The default reports none.
++    ///
++    /// # Errors
++    ///
++    /// Same as [`Self::lookup`].
++    fn lookup_traced(
++        &self,
++        key: &[u8],
++    ) -> Result<(Option<Vec<u8>>, serde_json::Value), PirProviderError> {
++        Ok((self.lookup(key)?, serde_json::Value::Null))
++    }
+ }
+ 
+ /// In-memory lookup for tests.
+diff --git a/crates/pir-provider/src/router.rs b/crates/pir-provider/src/router.rs
+index 1e26338..80c0c40 100644
+--- a/crates/pir-provider/src/router.rs
++++ b/crates/pir-provider/src/router.rs
+@@ -71,6 +71,16 @@ impl PirRouter {
+     /// RPC/HTTP errors. A PIR miss is **not** an error: account methods return
+     /// `0x0`.
+     pub async fn request(&self, method: &str, params: Value) -> Result<Value, PirProviderError> {
++        self.request_traced(method, params).await.0
++    }
++
++    /// Like [`Self::request`], plus the backend lookup metrics for PIR routes
++    /// (`Value::Null` for fallback routes or backends that report none).
++    pub async fn request_traced(
++        &self,
++        method: &str,
++        params: Value,
++    ) -> (Result<Value, PirProviderError>, Value) {
+         let params = if params.is_null() {
+             Value::Array(Vec::new())
+         } else {
+@@ -82,7 +92,7 @@ impl PirRouter {
+             Route::Call(m) => self.dataset_lookup(m.key, &m.value_encoding).await,
+             Route::Fallback => {
+                 debug!(method, "fallback RPC");
+-                self.fallback.request(method, params).await
++                (self.fallback.request(method, params).await, Value::Null)
+             }
+         }
+     }
+@@ -91,40 +101,52 @@ impl PirRouter {
+         &self,
+         params: &Value,
+         field: AccountField,
+-    ) -> Result<Value, PirProviderError> {
+-        let key = parse_address_param(params)?;
+-        let value = self.lookup_blocking(key.to_vec()).await?;
+-        match value {
+-            Some(raw) => {
+-                let acct = parse_account_bytes(&raw).ok_or_else(|| {
+-                    PirProviderError::Client("account value is not 40 bytes".into())
+-                })?;
+-                Ok(match field {
++    ) -> (Result<Value, PirProviderError>, Value) {
++        let key = match parse_address_param(params) {
++            Ok(k) => k,
++            Err(e) => return (Err(e), Value::Null),
++        };
++        let (value, trace) = match self.lookup_blocking(key.to_vec()).await {
++            Ok(v) => v,
++            Err(e) => return (Err(e), Value::Null),
++        };
++        let out = match value {
++            Some(raw) => parse_account_bytes(&raw)
++                .ok_or_else(|| PirProviderError::Client("account value is not 40 bytes".into()))
++                .map(|acct| match field {
+                     AccountField::Balance => encode_qty(acct.balance),
+                     AccountField::Nonce => encode_qty(u128::from(acct.nonce)),
+-                })
+-            }
++                }),
+             None => Ok(encode_qty(0)),
+-        }
++        };
++        (out, trace)
+     }
+ 
+     async fn dataset_lookup(
+         &self,
+         key: Vec<u8>,
+         encoding: &str,
+-    ) -> Result<Value, PirProviderError> {
+-        match self.lookup_blocking(key).await? {
+-            Some(raw) => Ok(match encoding {
++    ) -> (Result<Value, PirProviderError>, Value) {
++        let (value, trace) = match self.lookup_blocking(key).await {
++            Ok(v) => v,
++            Err(e) => return (Err(e), Value::Null),
++        };
++        let out = match value {
++            Some(raw) => match encoding {
+                 "bytes" | "account" => encode_bytes(&raw),
+                 _ => encode_uint256(&raw),
+-            }),
+-            None => Ok(encode_zero(encoding)),
+-        }
++            },
++            None => encode_zero(encoding),
++        };
++        (Ok(out), trace)
+     }
+ 
+-    async fn lookup_blocking(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, PirProviderError> {
++    async fn lookup_blocking(
++        &self,
++        key: Vec<u8>,
++    ) -> Result<(Option<Vec<u8>>, Value), PirProviderError> {
+         let lookup = Arc::clone(&self.lookup);
+-        tokio::task::spawn_blocking(move || lookup.lookup(&key)).await?
++        tokio::task::spawn_blocking(move || lookup.lookup_traced(&key)).await?
+     }
+ }
+ 

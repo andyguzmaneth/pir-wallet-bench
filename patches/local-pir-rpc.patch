@@ -1,0 +1,772 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index c697c7a..fb05be1 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -16,6 +16,8 @@ kohaku-pir-provider = { path = "../kohaku-rs/crates/pir-provider" }
+ pir-client = { path = "../inspire-gpu-serving/crates/client" }
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
++hex = "0.4"
++sha3 = "0.10"
+ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+ tracing = "0.1"
+ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+diff --git a/src/lookup.rs b/src/lookup.rs
+index 433954d..521a031 100644
+--- a/src/lookup.rs
++++ b/src/lookup.rs
+@@ -1,7 +1,9 @@
+ use std::sync::Mutex;
++use std::time::Instant;
+ 
+ use kohaku_pir_provider::{LookupBackend, PirProviderError};
+ use pir_client::PirClient;
++use serde_json::{Value, json};
+ 
+ /// Adapts `pir_client::PirClient` to [`LookupBackend`].
+ ///
+@@ -12,17 +14,45 @@ pub struct PirLookup(pub Mutex<PirClient>);
+ 
+ impl LookupBackend for PirLookup {
+     fn lookup(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PirProviderError> {
++        self.lookup_traced(key).map(|(v, _)| v)
++    }
++
++    /// One client serves every request, so lookups queue on the mutex;
++    /// `lock_wait_ms` is that queueing time.
++    fn lookup_traced(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, Value), PirProviderError> {
++        let t_lock = Instant::now();
+         let mut client = self
+             .0
+             .lock()
+             .map_err(|_| PirProviderError::Client("PirClient mutex poisoned".into()))?;
++        let lock_wait = t_lock.elapsed();
++        let t_lookup = Instant::now();
+         let result = if key.len() == 20 {
+             client.lookup_address(key)
+         } else {
+             client.lookup(key)
+         };
++        let lookup_elapsed = t_lookup.elapsed();
++        let m = &client.last_metrics;
++        let ms = |us: u64| us as f64 / 1e3;
++        let trace = json!({
++            "lock_wait_ms": lock_wait.as_secs_f64() * 1e3,
++            "lookup_ms": lookup_elapsed.as_secs_f64() * 1e3,
++            "query_build_ms": ms(m.query_build_us),
++            "http_ms": ms(m.http_us),
++            "body_ms": ms(m.body_us),
++            "decode_ms": ms(m.decode_us),
++            "req_bytes": m.req_bytes,
++            "resp_bytes": m.resp_bytes,
++            "sidecar_bytes": m.sidecar_bytes,
++            "sidecar_entries": m.sidecar_entries,
++            "stash_entries": m.stash_entries,
++            "snapshot_block": m.snapshot_block,
++            "source": if result.is_err() { "error" } else { m.source },
++            "retried": m.retried,
++        });
+         result
+-            .map(|found| found.map(|l| l.value))
++            .map(|found| (found.map(|l| l.value), trace))
+             .map_err(PirProviderError::Client)
+     }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 6760149..1e27bbb 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,7 +1,12 @@
+ mod lookup;
+ mod server;
++mod trace;
+ 
+-use std::sync::{Arc, Mutex};
++use std::collections::HashMap;
++use std::sync::atomic::AtomicU64;
++use std::sync::{Arc, Mutex, RwLock};
++
++use kohaku_pir_provider::DatasetManifest;
+ 
+ use clap::Parser;
+ use kohaku_pir_provider::PirRouter;
+@@ -24,6 +29,37 @@ struct Args {
+     /// Fallback Ethereum JSON-RPC URL (mainnet).
+     #[arg(long, env = "ETH_RPC_URL")]
+     rpc_url: String,
++
++    /// Append one JSON line per request (and per session marker) to this file.
++    #[arg(long, env = "BENCH_EVENTS")]
++    events: Option<std::path::PathBuf>,
++
++    /// With --events: also store raw request params (needed for replay).
++    #[arg(long)]
++    record_params: bool,
++
++    /// JSON map of address -> {"name", "kind"} used to label calls in events.
++    #[arg(long)]
++    labels: Option<std::path::PathBuf>,
++
++    /// JSON array of DatasetManifest entries that route matching eth_call to PIR.
++    #[arg(long)]
++    datasets: Option<std::path::PathBuf>,
++
++    /// Initial session tag (change it with POST /_bench/session).
++    #[arg(long, default_value = "")]
++    session: String,
++}
++
++fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> T {
++    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
++        error!(path = %path.display(), error = %e, "read failed");
++        std::process::exit(1);
++    });
++    serde_json::from_str(&text).unwrap_or_else(|e| {
++        error!(path = %path.display(), error = %e, "invalid JSON");
++        std::process::exit(1);
++    })
+ }
+ 
+ #[tokio::main]
+@@ -59,17 +95,44 @@ async fn main() {
+     );
+ 
+     let lookup = Arc::new(PirLookup(Mutex::new(client)));
+-    let router = match PirRouter::with_rpc(lookup, &args.rpc_url, Vec::new()) {
+-        Ok(r) => Arc::new(r),
++    let datasets: Vec<DatasetManifest> = args.datasets.as_deref().map(read_json).unwrap_or_default();
++    let router = match PirRouter::with_rpc(lookup, &args.rpc_url, datasets) {
++        Ok(r) => r,
+         Err(e) => {
+             error!(error = %e, "PirRouter::with_rpc failed");
+             std::process::exit(1);
+         }
+     };
+ 
++    let labels: HashMap<String, trace::Label> =
++        args.labels.as_deref().map(read_json).unwrap_or_default();
++    let tables = trace::Tables::new(labels);
++    let events = args.events.as_ref().map(|p| {
++        let f = std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(p)
++            .unwrap_or_else(|e| {
++                error!(path = %p.display(), error = %e, "open events file failed");
++                std::process::exit(1);
++            });
++        info!(path = %p.display(), labels = tables.label_count(), "writing bench events");
++        Mutex::new(std::io::BufWriter::new(f))
++    });
++    let state = Arc::new(server::App {
++        router,
++        tables,
++        events,
++        record_params: args.record_params,
++        session: RwLock::new(args.session.clone()),
++        seq: AtomicU64::new(0),
++        inflight: AtomicU64::new(0),
++    });
++
+     let app = axum::Router::new()
+         .route("/", axum::routing::post(server::handle_rpc))
+-        .with_state(router);
++        .route("/_bench/session", axum::routing::post(server::set_session))
++        .with_state(state);
+ 
+     let listener = match tokio::net::TcpListener::bind(&args.listen).await {
+         Ok(l) => l,
+diff --git a/src/server.rs b/src/server.rs
+index a85baae..f4ac8da 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -1,19 +1,69 @@
+-use std::sync::Arc;
+-use std::time::Instant;
++use std::io::Write;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Arc, Mutex, RwLock};
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+ use axum::Json;
+ use axum::extract::State;
+-use axum::http::StatusCode;
++use axum::http::{HeaderMap, StatusCode};
+ use axum::response::IntoResponse;
+-use kohaku_pir_provider::PirRouter;
+-use serde_json::{Value, json};
++use kohaku_pir_provider::{PirRouter, Route};
++use serde_json::{Map, Value, json};
+ use tracing::info;
+ 
+-pub type AppState = Arc<PirRouter>;
++use crate::trace::{Tables, result_meta};
++
++pub struct App {
++    pub router: PirRouter,
++    pub tables: Tables,
++    /// JSONL sink; `None` keeps the proxy at its original behaviour.
++    pub events: Option<Mutex<std::io::BufWriter<std::fs::File>>>,
++    /// Store raw params in each event (needed for replay).
++    pub record_params: bool,
++    pub session: RwLock<String>,
++    pub seq: AtomicU64,
++    pub inflight: AtomicU64,
++}
++
++pub type AppState = Arc<App>;
++
++impl App {
++    fn emit(&self, ev: Value) {
++        let Some(sink) = &self.events else { return };
++        let Ok(mut w) = sink.lock() else { return };
++        let _ = serde_json::to_writer(&mut *w, &ev);
++        let _ = w.write_all(b"\n");
++        let _ = w.flush();
++    }
++}
++
++fn now_ms() -> f64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map_or(0.0, |d| d.as_secs_f64() * 1e3)
++}
++
++/// `POST /_bench/session {"session": "name"}` tags later events; returns the
++/// previous tag. Also emits a marker event so sessions have explicit bounds.
++pub async fn set_session(State(app): State<AppState>, Json(body): Json<Value>) -> impl IntoResponse {
++    let name = body
++        .get("session")
++        .and_then(Value::as_str)
++        .unwrap_or("")
++        .to_string();
++    let prev = {
++        let mut s = app.session.write().unwrap_or_else(std::sync::PoisonError::into_inner);
++        std::mem::replace(&mut *s, name.clone())
++    };
++    app.emit(json!({ "ts": now_ms(), "kind": "session", "session": name, "prev": prev }));
++    info!(session = %name, "bench session");
++    Json(json!({ "prev": prev }))
++}
+ 
+ /// Handle a JSON-RPC POST body (single object or batch array).
+ pub async fn handle_rpc(
+-    State(router): State<AppState>,
++    State(app): State<AppState>,
++    headers: HeaderMap,
+     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
+ ) -> impl IntoResponse {
+     let Json(body) = match body {
+@@ -30,19 +80,44 @@ pub async fn handle_rpc(
+                 .into_response();
+         }
+     };
++    let session = headers
++        .get("x-bench-session")
++        .and_then(|v| v.to_str().ok())
++        .map(String::from)
++        .unwrap_or_else(|| {
++            app.session
++                .read()
++                .map(|s| s.clone())
++                .unwrap_or_default()
++        });
+ 
+     if let Some(arr) = body.as_array() {
++        let batch_id = app.seq.fetch_add(1, Ordering::Relaxed);
+         let mut out = Vec::with_capacity(arr.len());
+         for item in arr {
+-            out.push(dispatch_one(&router, item).await);
++            out.push(dispatch_one(&app, item, &session, Some((batch_id, arr.len()))).await);
+         }
+         return (StatusCode::OK, Json(Value::Array(out))).into_response();
+     }
+ 
+-    (StatusCode::OK, Json(dispatch_one(&router, &body).await)).into_response()
++    (StatusCode::OK, Json(dispatch_one(&app, &body, &session, None).await)).into_response()
++}
++
++fn route_name(route: &Route) -> (&'static str, Option<String>) {
++    match route {
++        Route::AccountBalance => ("AccountBalance", None),
++        Route::AccountNonce => ("AccountNonce", None),
++        Route::Call(m) => ("Call", Some(m.dataset_id.clone())),
++        Route::Fallback => ("Fallback", None),
++    }
+ }
+ 
+-async fn dispatch_one(router: &PirRouter, req: &Value) -> Value {
++async fn dispatch_one(
++    app: &App,
++    req: &Value,
++    session: &str,
++    batch: Option<(u64, usize)>,
++) -> Value {
+     let id = req.get("id").cloned().unwrap_or(Value::Null);
+     let method = match req.get("method").and_then(|m| m.as_str()) {
+         Some(m) => m,
+@@ -56,41 +131,76 @@ async fn dispatch_one(router: &PirRouter, req: &Value) -> Value {
+     };
+     let params = req.get("params").cloned().unwrap_or(Value::Array(vec![]));
+ 
+-    let route = router.routes().classify(method, &params);
++    let route = app.router.routes().classify(method, &params);
++    let meta = app.events.is_some().then(|| app.tables.request_meta(method, &params));
++    let recorded_params = (app.events.is_some() && app.record_params).then(|| params.clone());
++    let seq = app.seq.fetch_add(1, Ordering::Relaxed);
++    let inflight = app.inflight.fetch_add(1, Ordering::Relaxed);
++    let ts = now_ms();
+     let start = Instant::now();
+-    let result = router.request(method, params).await;
+-    let elapsed_ms = start.elapsed().as_millis();
++    let (result, pir) = app.router.request_traced(method, params).await;
++    let elapsed = start.elapsed();
++    app.inflight.fetch_sub(1, Ordering::Relaxed);
++    let elapsed_ms = elapsed.as_millis();
+ 
+-    match result {
++    let response = match &result {
+         Ok(value) => {
+-            info!(
+-                method,
+-                ?route,
+-                elapsed_ms,
+-                "ok"
+-            );
+-            json!({
+-                "jsonrpc": "2.0",
+-                "id": id,
+-                "result": value
+-            })
++            info!(method, ?route, elapsed_ms, "ok");
++            json!({ "jsonrpc": "2.0", "id": id, "result": value })
+         }
+         Err(e) => {
+-            info!(
+-                method,
+-                ?route,
+-                elapsed_ms,
+-                error = %e,
+-                "err"
+-            );
++            info!(method, ?route, elapsed_ms, error = %e, "err");
+             json!({
+                 "jsonrpc": "2.0",
+                 "id": id,
+-                "error": {
+-                    "code": e.rpc_code(),
+-                    "message": e.to_string()
+-                }
++                "error": { "code": e.rpc_code(), "message": e.to_string() }
+             })
+         }
++    };
++
++    if app.events.is_some() {
++        let (route_s, dataset) = route_name(&route);
++        let mut ev = Map::new();
++        ev.insert("ts".into(), json!(ts));
++        ev.insert("kind".into(), json!("rpc"));
++        ev.insert("seq".into(), json!(seq));
++        ev.insert("session".into(), json!(session));
++        if let Some((bid, bsize)) = batch {
++            ev.insert("batch_id".into(), json!(bid));
++            ev.insert("batch_size".into(), json!(bsize));
++        }
++        ev.insert("method".into(), json!(method));
++        ev.insert("route".into(), json!(route_s));
++        if let Some(d) = dataset {
++            ev.insert("dataset".into(), json!(d));
++        }
++        ev.insert("ok".into(), json!(result.is_ok()));
++        if let Err(e) = &result {
++            ev.insert("error".into(), json!(e.to_string()));
++        }
++        ev.insert("total_ms".into(), json!(elapsed.as_secs_f64() * 1e3));
++        ev.insert("inflight_at_start".into(), json!(inflight));
++        // JSON-RPC payload sizes as the wallet sees them (what a plain RPC
++        // would carry). PIR wire bytes are under "pir".
++        ev.insert("rpc_req_bytes".into(), json!(serde_json::to_vec(req).map_or(0, |v| v.len())));
++        ev.insert(
++            "rpc_resp_bytes".into(),
++            json!(serde_json::to_vec(&response).map_or(0, |v| v.len())),
++        );
++        if let Some(meta) = meta {
++            ev.extend(meta);
++        }
++        if let Ok(value) = &result {
++            ev.extend(result_meta(method, value));
++        }
++        if !pir.is_null() {
++            ev.insert("pir".into(), pir);
++        }
++        if let Some(p) = recorded_params {
++            ev.insert("params".into(), p);
++        }
++        app.emit(Value::Object(ev));
+     }
++
++    response
+ }
+diff --git a/src/trace.rs b/src/trace.rs
+new file mode 100644
+index 0000000..a2a69f1
+--- /dev/null
++++ b/src/trace.rs
+@@ -0,0 +1,356 @@
++//! Request metadata for bench events: what a call touches, without the EVM.
++//!
++//! Everything here is best effort. A field that cannot be parsed is left out
++//! rather than failing the request.
++
++use std::collections::HashMap;
++
++use serde::Deserialize;
++use serde_json::{Map, Value, json};
++use sha3::{Digest, Keccak256};
++
++/// Function signatures worth naming in reports. Selectors are derived at
++/// startup, so a typo here shows up as an unnamed selector, not a wrong one.
++const SIGNATURES: &[(&str, &str)] = &[
++    // ERC-20
++    ("balanceOf(address)", "erc20"),
++    ("allowance(address,address)", "erc20"),
++    ("decimals()", "erc20"),
++    ("symbol()", "erc20"),
++    ("name()", "erc20"),
++    ("totalSupply()", "erc20"),
++    // Multicall
++    ("aggregate((address,bytes)[])", "multicall"),
++    ("aggregate3((address,bool,bytes)[])", "multicall"),
++    ("aggregate3Value((address,bool,uint256,bytes)[])", "multicall"),
++    ("tryAggregate(bool,(address,bytes)[])", "multicall"),
++    ("tryBlockAndAggregate(bool,(address,bytes)[])", "multicall"),
++    ("getEthBalance(address)", "multicall"),
++    ("getBlockNumber()", "multicall"),
++    // ENS
++    ("resolver(bytes32)", "ens"),
++    ("owner(bytes32)", "ens"),
++    ("addr(bytes32)", "ens"),
++    ("addr(bytes32,uint256)", "ens"),
++    ("text(bytes32,string)", "ens"),
++    ("contenthash(bytes32)", "ens"),
++    ("name(bytes32)", "ens"),
++    ("resolve(bytes,bytes)", "ens"),
++    ("reverse(bytes)", "ens"),
++    ("reverseWithGateways(bytes,uint256,string[])", "ens"),
++    ("resolveWithGateways(bytes,bytes,string[])", "ens"),
++    ("reverseResolve(address)", "names"),
++    ("available(string)", "ens"),
++    ("rentPrice(string,uint256)", "ens"),
++    ("makeCommitment(string,address,uint256,bytes32,address,bytes[],bool,uint16)", "ens"),
++    // ERC-721 / ERC-165
++    ("ownerOf(uint256)", "erc721"),
++    ("supportsInterface(bytes4)", "erc165"),
++    // Stealth addresses (ERC-5564 / ERC-6538)
++    ("stealthMetaAddressOf(address,uint256)", "stealth"),
++    ("nonceOf(address)", "stealth"),
++    // Price feeds and pools (kohaku-cli USD values)
++    ("latestRoundData()", "oracle"),
++    ("getPair(address,address)", "dex"),
++    ("getPool(address,address,uint24)", "dex"),
++    ("getReserves()", "dex"),
++    ("slot0()", "dex"),
++    ("token0()", "dex"),
++    // Privacy protocols, common views
++    ("isKnownRoot(bytes32)", "privacy"),
++    ("isSpent(bytes32)", "privacy"),
++    ("nullifierHashes(bytes32)", "privacy"),
++    ("getLastRoot()", "privacy"),
++    ("merkleRoot()", "privacy"),
++    ("treeNumber()", "privacy"),
++    ("denomination()", "privacy"),
++    ("ROOT_HISTORY_SIZE()", "privacy"),
++    ("instances(address)", "privacy"),
++    ("getAllInstanceAddresses()", "privacy"),
++];
++
++#[derive(Clone, Debug, Deserialize)]
++pub struct Label {
++    pub name: String,
++    #[serde(default)]
++    pub kind: String,
++}
++
++pub struct Tables {
++    selectors: HashMap<[u8; 4], (&'static str, &'static str)>,
++    labels: HashMap<[u8; 20], Label>,
++}
++
++impl Tables {
++    pub fn new(labels: HashMap<String, Label>) -> Self {
++        let selectors = SIGNATURES
++            .iter()
++            .map(|(sig, kind)| {
++                let h = Keccak256::digest(sig.as_bytes());
++                ([h[0], h[1], h[2], h[3]], (*sig, *kind))
++            })
++            .collect();
++        let labels = labels
++            .into_iter()
++            .filter_map(|(addr, l)| Some((parse_addr(&addr)?, l)))
++            .collect();
++        Self { selectors, labels }
++    }
++
++    pub fn label_count(&self) -> usize {
++        self.labels.len()
++    }
++
++    /// Describe one call target + calldata.
++    fn describe(&self, to: &[u8; 20], data: &[u8]) -> Map<String, Value> {
++        let mut m = Map::new();
++        m.insert("to".into(), json!(format!("0x{}", hex::encode(to))));
++        if let Some(l) = self.labels.get(to) {
++            m.insert("to_label".into(), json!(l.name));
++            if !l.kind.is_empty() {
++                m.insert("to_kind".into(), json!(l.kind));
++            }
++        }
++        m.insert("data_bytes".into(), json!(data.len()));
++        if data.len() >= 4 {
++            let sel: [u8; 4] = data[..4].try_into().unwrap();
++            m.insert("selector".into(), json!(format!("0x{}", hex::encode(sel))));
++            if let Some((sig, kind)) = self.selectors.get(&sel) {
++                m.insert("fn".into(), json!(sig));
++                m.insert("fn_kind".into(), json!(kind));
++                if *kind == "multicall" {
++                    if let Some(inner) = decode_multicall(sig, &data[4..]) {
++                        let inner: Vec<Value> = inner
++                            .iter()
++                            .map(|(t, d)| Value::Object(self.describe(t, d)))
++                            .collect();
++                        m.insert("inner_count".into(), json!(inner.len()));
++                        m.insert("inner".into(), Value::Array(inner));
++                    }
++                }
++            }
++        }
++        m
++    }
++
++    /// Method-specific metadata for one JSON-RPC item.
++    pub fn request_meta(&self, method: &str, params: &Value) -> Map<String, Value> {
++        let mut out = Map::new();
++        let arr = params.as_array();
++        let first = arr.and_then(|a| a.first());
++        match method {
++            "eth_call" | "eth_estimateGas" | "eth_createAccessList" => {
++                if let Some(obj) = first {
++                    let to = obj.get("to").and_then(Value::as_str).and_then(parse_addr);
++                    let data = obj
++                        .get("data")
++                        .or_else(|| obj.get("input"))
++                        .and_then(Value::as_str)
++                        .and_then(parse_hex)
++                        .unwrap_or_default();
++                    if let Some(to) = to {
++                        out.insert("call".into(), Value::Object(self.describe(&to, &data)));
++                    }
++                }
++                if let Some(tag) = arr.and_then(|a| a.get(1)) {
++                    out.insert("block_tag".into(), block_tag(tag));
++                }
++            }
++            "eth_getBalance" | "eth_getTransactionCount" | "eth_getCode" => {
++                if let Some(addr) = first.and_then(Value::as_str).and_then(parse_addr) {
++                    let mut m = Map::new();
++                    m.insert("address".into(), json!(format!("0x{}", hex::encode(addr))));
++                    if let Some(l) = self.labels.get(&addr) {
++                        m.insert("label".into(), json!(l.name));
++                    }
++                    out.insert("account".into(), Value::Object(m));
++                }
++                out.insert(
++                    "block_tag".into(),
++                    arr.and_then(|a| a.get(1)).map_or(json!("latest"), block_tag),
++                );
++            }
++            "eth_getStorageAt" => {
++                if let Some(tag) = arr.and_then(|a| a.get(2)) {
++                    out.insert("block_tag".into(), block_tag(tag));
++                }
++            }
++            "eth_getLogs" => {
++                if let Some(f) = first {
++                    out.insert("logs".into(), Value::Object(self.logs_meta(f)));
++                }
++            }
++            _ => {}
++        }
++        out
++    }
++
++    fn logs_meta(&self, f: &Value) -> Map<String, Value> {
++        let mut m = Map::new();
++        let addrs: Vec<String> = match f.get("address") {
++            Some(Value::String(s)) => vec![s.clone()],
++            Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
++            _ => vec![],
++        };
++        let labels: Vec<Value> = addrs
++            .iter()
++            .map(|a| {
++                parse_addr(a)
++                    .and_then(|b| self.labels.get(&b))
++                    .map_or(Value::Null, |l| json!(l.name))
++            })
++            .collect();
++        m.insert("addresses".into(), json!(addrs));
++        m.insert("labels".into(), Value::Array(labels));
++        let from = f.get("fromBlock").and_then(Value::as_str);
++        let to = f.get("toBlock").and_then(Value::as_str);
++        m.insert("from".into(), json!(from));
++        m.insert("to".into(), json!(to));
++        if let (Some(a), Some(b)) = (from.and_then(parse_qty), to.and_then(parse_qty)) {
++            m.insert("span".into(), json!(b.saturating_sub(a) + 1));
++        }
++        if let Some(t0) = f.get("topics").and_then(Value::as_array).and_then(|t| t.first()) {
++            m.insert("topic0".into(), t0.clone());
++        }
++        if f.get("blockHash").is_some() {
++            m.insert("by_block_hash".into(), json!(true));
++        }
++        m
++    }
++}
++
++/// Per-result metadata: chain head from `eth_blockNumber`, log counts.
++pub fn result_meta(method: &str, result: &Value) -> Map<String, Value> {
++    let mut m = Map::new();
++    match method {
++        "eth_blockNumber" => {
++            if let Some(n) = result.as_str().and_then(parse_qty) {
++                m.insert("head_block".into(), json!(n));
++            }
++        }
++        "eth_getLogs" => {
++            if let Some(a) = result.as_array() {
++                m.insert("log_count".into(), json!(a.len()));
++            }
++        }
++        "eth_getBlockByNumber" => {
++            if let Some(n) = result.get("number").and_then(Value::as_str).and_then(parse_qty) {
++                m.insert("block_number".into(), json!(n));
++            }
++        }
++        _ => {}
++    }
++    m
++}
++
++fn block_tag(v: &Value) -> Value {
++    match v {
++        Value::String(s) => json!(s),
++        Value::Object(o) => o
++            .get("blockNumber")
++            .or_else(|| o.get("blockHash"))
++            .cloned()
++            .map_or(json!("object"), |x| x),
++        Value::Null => json!("latest"),
++        other => other.clone(),
++    }
++}
++
++fn parse_hex(s: &str) -> Option<Vec<u8>> {
++    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
++    hex::decode(s).ok()
++}
++
++fn parse_addr(s: &str) -> Option<[u8; 20]> {
++    parse_hex(s)?.try_into().ok()
++}
++
++fn parse_qty(s: &str) -> Option<u64> {
++    let h = s.strip_prefix("0x")?;
++    u64::from_str_radix(h, 16).ok()
++}
++
++fn word(buf: &[u8], at: usize) -> Option<&[u8]> {
++    buf.get(at..at.checked_add(32)?)
++}
++
++fn word_usize(buf: &[u8], at: usize) -> Option<usize> {
++    let w = word(buf, at)?;
++    if w[..24].iter().any(|b| *b != 0) {
++        return None;
++    }
++    Some(u64::from_be_bytes(w[24..32].try_into().ok()?) as usize)
++}
++
++/// Decode the inner (target, calldata) pairs of a Multicall call. `args` is
++/// calldata after the selector.
++fn decode_multicall(sig: &str, args: &[u8]) -> Option<Vec<([u8; 20], Vec<u8>)>> {
++    // (index of the bytes field in the tuple, head words before the array offset)
++    let (bytes_idx, lead) = match sig {
++        "aggregate((address,bytes)[])" => (1, 0),
++        "aggregate3((address,bool,bytes)[])" => (2, 0),
++        "aggregate3Value((address,bool,uint256,bytes)[])" => (3, 0),
++        "tryAggregate(bool,(address,bytes)[])" | "tryBlockAndAggregate(bool,(address,bytes)[])" => {
++            (1, 1)
++        }
++        _ => return None,
++    };
++    let arr_off = word_usize(args, lead * 32)?;
++    let n = word_usize(args, arr_off)?;
++    if n > 10_000 {
++        return None;
++    }
++    let base = arr_off + 32;
++    let mut out = Vec::with_capacity(n);
++    for i in 0..n {
++        let tuple = base + word_usize(args, base + i * 32)?;
++        let target: [u8; 20] = word(args, tuple)?[12..32].try_into().ok()?;
++        let data_off = tuple + word_usize(args, tuple + bytes_idx * 32)?;
++        let len = word_usize(args, data_off)?;
++        let data = args.get(data_off + 32..data_off + 32 + len)?.to_vec();
++        out.push((target, data));
++    }
++    Some(out)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn names_balance_of() {
++        let t = Tables::new(HashMap::new());
++        let data = format!("0x70a08231{:0>64}", "02");
++        let m = t.request_meta(
++            "eth_call",
++            &json!([{ "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "data": data }, "latest"]),
++        );
++        assert_eq!(m["call"]["fn"], "balanceOf(address)");
++        assert_eq!(m["call"]["fn_kind"], "erc20");
++    }
++
++    #[test]
++    fn decodes_aggregate3() {
++        // aggregate3([(0x..01, true, 0x70a08231 ++ addr 2)])
++        let inner = format!("70a08231{:0>64}", "02");
++        let inner_len = inner.len() / 2;
++        let padded = format!("{inner:0<width$}", width = inner_len.div_ceil(32) * 64);
++        let mut hexs = String::new();
++        hexs += &format!("{:064x}", 0x20); // array offset
++        hexs += &format!("{:064x}", 1); // length
++        hexs += &format!("{:064x}", 0x20); // tuple 0 offset (rel. to array data)
++        hexs += &format!("{:0>64}", "01"); // target
++        hexs += &format!("{:064x}", 1); // allowFailure
++        hexs += &format!("{:064x}", 0x60); // bytes offset rel. to tuple
++        hexs += &format!("{:064x}", inner_len);
++        hexs += &padded;
++        let t = Tables::new(HashMap::new());
++        let m = t.request_meta(
++            "eth_call",
++            &json!([{ "to": "0xcA11bde05977b3631167028862bE2a173976CA11", "data": format!("0x82ad56cb{hexs}") }]),
++        );
++        assert_eq!(m["call"]["fn"], "aggregate3((address,bool,bytes)[])");
++        assert_eq!(m["call"]["inner_count"], 1);
++        assert_eq!(m["call"]["inner"][0]["fn"], "balanceOf(address)");
++    }
++}
