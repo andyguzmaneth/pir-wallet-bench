@@ -172,7 +172,7 @@ def grouped_hbar(groups, series, unit_fmt, width=720, colors=None):
     left = min(max(120, 16 + longest * 7), 330)
     ns = len(series)
     colors = colors or C
-    vmax = max((v for _, vals, _ in groups for v in vals if v), default=0) or 1
+    vmax = max((v for g in groups for v in g[1] if v), default=0) or 1
     ticks = nice_ticks(vmax)
     xmax = ticks[-1]
     plot_w = width - left - right
@@ -183,7 +183,9 @@ def grouped_hbar(groups, series, unit_fmt, width=720, colors=None):
         x = left + t / xmax * plot_w
         out.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{top}" y2="{h - 22}" class="grid"/>')
         out.append(f'<text x="{x:.1f}" y="{h - 6}" class="tick" text-anchor="middle">{esc(unit_fmt(t))}</text>')
-    for gi, (label, vals, tips) in enumerate(groups):
+    for gi, g in enumerate(groups):
+        label, vals, tips = g[:3]
+        bar_colors = g[3] if len(g) > 3 else [None] * ns
         y0 = top + gi * (gh + gap)
         out.append(f'<text x="{left - 10}" y="{y0 + gh / 2 + 4}" class="lab" text-anchor="end">{esc(label)}</text>')
         for j, v in enumerate(vals):
@@ -195,9 +197,9 @@ def grouped_hbar(groups, series, unit_fmt, width=720, colors=None):
             tip = f"{label} · {series[j]}: {unit_fmt(v)}" + (f" · {tips[j]}" if tips and tips[j] else "")
             if w > 4:
                 out.append(f'<path d="M{left},{y} h{w - 4:.1f} a4,4 0 0 1 4,4 v{bar_h - 8} a4,4 0 0 1 -4,4 h{-(w - 4):.1f} z" '
-                           f'fill="{colors[j]}" class="mark" data-tip="{esc(tip)}" tabindex="0"/>')
+                           f'fill="{bar_colors[j] or colors[j]}" class="mark" data-tip="{esc(tip)}" tabindex="0"/>')
             else:
-                out.append(f'<rect x="{left}" y="{y}" width="{w:.1f}" height="{bar_h}" fill="{colors[j]}" class="mark" data-tip="{esc(tip)}" tabindex="0"/>')
+                out.append(f'<rect x="{left}" y="{y}" width="{w:.1f}" height="{bar_h}" fill="{bar_colors[j] or colors[j]}" class="mark" data-tip="{esc(tip)}" tabindex="0"/>')
             out.append(f'<text x="{left + w + 6:.1f}" y="{y + bar_h - 3}" class="val">{esc(unit_fmt(v))}</text>')
     out.append(f'<line x1="{left}" x2="{left}" y1="{top - 4}" y2="{h - 22}" class="axis"/>')
     out.append("</svg>")
@@ -303,15 +305,16 @@ def table(headers, rows, num_from=1, text_cols=()):
     return f'<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>'
 
 
-def details_table(headers, rows, num_from=1, summary="Table view"):
-    return f"<details><summary>{esc(summary)}</summary>{table(headers, rows, num_from)}</details>"
+def details_table(headers, rows, num_from=1, summary="Table view", text_cols=()):
+    return f"<details><summary>{esc(summary)}</summary>{table(headers, rows, num_from, text_cols)}</details>"
 
 
 def insight(title, value, detail, anchor, todo=""):
     return (f'<a class="card" href="#{anchor}"><div class="ct">{esc(title)}</div><div class="cv">{esc(value)}</div>'
             f'<div class="cd">{esc(detail)}</div>'
-            + (f'<button type="button" class="info" aria-label="What we can do" '
-               f'data-tip="What we can do: {esc(todo)}">i</button>' if todo else "") + '</a>')
+            + (f'<div class="todo"><b>What we can do</b><button type="button" class="info" '
+               f'aria-label="What we can do" data-title="What we can do" data-tip="{esc(todo)}">i</button></div>'
+               if todo else "") + '</a>')
 
 
 METHOD = (
@@ -623,12 +626,11 @@ def build(run: Path):
     SER = ["PIR", "Public RPC, privacy-sensitive", "Public RPC, no private input"]
     COL = [C[0], C[1], "var(--insens)"]
     parts.append('<section id="requests"><h2>Time per request, by route</h2>'
-                 '<p class="sub">Median time of one request in each wallet action. Privacy-sensitive requests carry one '
-                 'of your addresses, a note-specific check, or your intent (which tokens or trading pairs you look '
-                 'up); gray requests have no private input and are the same for every user (chain id, block number, '
-                 'public protocol state). Stealth-registry reads count as gray: making stealth addresses private needs '
-                 'oblivious message retrieval, not PIR. Each bar is a single request, so they are compared, not '
-                 'added.</p>'
+                 '<p class="sub">Median time of one request in each wallet action. Bars are compared, not added.</p>'
+                 '<ul class="keys"><li><b>Privacy-sensitive</b> requests carry your address, a specific note, or '
+                 'your intent (which tokens or pairs you look up).</li>'
+                 '<li><b>Gray</b> requests have no private input: chain id, block number, public protocol state. '
+                 'Stealth-registry reads are gray too, because making them private needs OMR, not PIR.</li></ul>'
                  + legend(list(zip(SER, COL)))
                  + grouped_hbar(groups, SER, fmt_ms, colors=COL)
                  + "".join(f'<p class="sub">Not shown: {esc(n)} {esc(LOCAL_NOTES.get(n, "makes no PIR lookups"))} '
@@ -637,10 +639,9 @@ def build(run: Path):
                  + table(["Wallet action", "PIR lookups", "Median", "Sensitive, public RPC", "Median",
                           "No private input", "Median"], trows)
                  + '<h3>What went to the public RPC</h3>'
-                 '<p class="sub">Grouped by method and, for eth_call, by the kind of contract function. Orange groups '
-                 'reveal something about you; gray groups do not (a full event scan of a public contract still shows '
-                 'that you use that protocol, not who you are in it). The last column names the dataset that would let '
-                 'PIR serve it, or why it needs none.</p>'
+                 '<p class="sub">Grouped by method and contract function. The last column names the dataset that would '
+                 'let PIR serve each group. A gray event scan of a public contract still shows that you use the '
+                 'protocol, but not who you are in it.</p>'
                  + legend([("Privacy-sensitive", C[1]), ("No private input", "var(--insens)")])
                  + stacked_hbar([(k, [v["sens"], v["n"] - v["sens"]], f"{fmt_ms(v['ms'])} total") for k, v in ranked[:14]],
                                 ["privacy-sensitive", "no private input"], lambda x: f"{x:.0f}",
@@ -699,11 +700,10 @@ def build(run: Path):
                              f"{v['pir'] / v['baseline']:.1f}×" if v.get("pir") and v.get("baseline") else "–"])
         skipped = [x for x in order if x not in with_pir]
         parts.append('<section id="wallet"><h2>Wallet actions: with vs without PIR</h2>'
-                     f'<p class="sub">The same recorded commands replayed request by request at {c_lo} wallet, median. '
-                     'With PIR: ETH balance lookups over PIR, every other request over the public RPC (what the proxy '
-                     'does). Without PIR: every request over the public RPC.'
-                     + (f' Not shown, because they make no PIR lookups: {esc(", ".join(skipped))}.' if skipped else "")
-                     + '</p>'
+                     f'<p class="sub">The same recorded commands, replayed at {c_lo} wallet (median).</p>'
+                     '<ul class="keys"><li><b>With PIR:</b> balance lookups over PIR, everything else over the public '
+                     'RPC.</li><li><b>Without PIR:</b> everything over the public RPC.</li></ul>'
+                     + (f'<p class="sub">Not shown: {esc(", ".join(skipped))} (no PIR lookups).</p>' if skipped else "")
                      + legend([(NAMES[l], C[i]) for i, l in enumerate(labels)])
                      + grouped_hbar(wgroups, [NAMES[l] for l in labels], fmt_ms)
                      + details_table(["Wallet action", "Parallel wallets", *(NAMES[l] for l in labels), "Ratio"], rows,
@@ -734,29 +734,24 @@ def build(run: Path):
                 "Build query (client)": "Client CPU. Negligible.",
                 "Decode (client)": "Client CPU. Negligible.",
             }
-            body += ('<p class="sub">One lookup, step by step, median of the timing pairs. Round trip and upload are '
-                     'measured with a probe that uploads a full-size body the server rejects without GPU work; server '
-                     'compute is what remains of the wait for the first response byte.</p>'
+            body += ('<p class="sub">One lookup, step by step (median). Upload and round trip come from a probe the server '
+                     'rejects without GPU work; server compute is the rest of the wait for the first byte.</p>'
                      + legend([(n, C[i]) for i, (n, _, _) in enumerate(steps)])
                      + stacked_hbar([("one lookup", [v for _, v, _ in steps], "")], [n for n, _, _ in steps], fmt_ms)
                      + table(["Step", "Median", "Share", "What drives it and what to optimize"],
                              [[n, fmt_ms(v), f"{v / steps_total:.0%}", levers[n]]
                               for n, v, _ in sorted(steps, key=lambda x: -x[1])], text_cols=(3,))
                      + (('<h3>Experiment: the same lookup with better TCP handling</h3>'
-                         f'<p class="sub">Link check from this machine: ~{tcp["bandwidth"]["cloudflare_down_mbit"]} Mbit/s '
-                         f'down, ~{tcp["bandwidth"]["cloudflare_up_mbit"]} Mbit/s up to a nearby server; '
-                         f'{tcp["bandwidth"]["pir_rtt_ms"]} ms ping to the PIR server. Same PIR server and scheme, '
-                         f'{tcp["rows"][0]["n"]} lookups per row, median. The server side was not changed, so its '
-                         'download still restarts slowly.</p>'
+                         f'<p class="sub">This machine does ~{tcp["bandwidth"]["cloudflare_down_mbit"]} Mbit/s each way; the PIR '
+                         f'server is {tcp["bandwidth"]["pir_rtt_ms"]} ms away. Same server and scheme, '
+                         f'{tcp["rows"][0]["n"]} lookups per row. Only the client side was changed.</p>'
                          + table(["Setup", "What changed", "Lookup", "Send + server + first byte", "Download"],
                                  [[r["label"], r["detail"], fmt_ms(r["lookup_ms"]), fmt_ms(r["http_ms"]),
                                    fmt_ms(r["body_ms"])] for r in tcp["rows"]], num_from=2)) if tcp else ""))
         body += ('<h3>Bytes per lookup over time</h3>'
-                 '<p class="sub">Every response carries a "sidecar": the list of all account changes since the server '
-                 'last rebuilt its PIR database. Every client gets the full list, so the server cannot tell which entry '
-                 'you needed. The list grows with each block (about 12 s), so responses get bigger, then drop to almost '
-                 'nothing when the server rebuilds the database and the list starts over. Each dot is one lookup in this '
-                 'run; the gap in the middle is the Railgun scenario downloading its own data.</p>'
+                 '<p class="sub">Each response carries the sidecar: all account changes since the server last rebuilt '
+                 'its database. It grows every block and resets at each rebuild, hence the sawtooth. Each dot is one '
+                 'lookup; the gap is the Railgun scenario downloading its own data.</p>'
                  + legend([("Response bytes", C[0]), ("of which sidecar", C[1])], "line")
                  + line_chart([("Response", [((t - t0) / 1e3, p_["resp_bytes"]) for t, p_ in side]),
                                ("Sidecar", [((t - t0) / 1e3, p_["sidecar_bytes"]) for t, p_ in side])],
@@ -783,22 +778,19 @@ def build(run: Path):
     load_html = ""
     if load_levels:
         errs = Counter(r["concurrency"] for r in pbench if r.get("kind") == "lookup" and not r.get("ok"))
-        load_html += ('<p class="sub">Two tests answer two questions. Can the PIR server serve many wallets at once? '
-                      'And does the proxy in front of it keep up? Both simulate several wallets at the same time.</p>'
-                      '<h3>PIR server, direct</h3><p class="sub">Each simulated wallet has its own PIR client and talks '
-                      'to the server directly (pir-bench). If the server were the limit, lookups would slow down as '
-                      'wallets are added. They stay around 1.5–2.5 s from 1 to 16 wallets, and lookups per second grow '
-                      'with the number of wallets, so the server is not the limit at this load.</p>'
+        load_html += ('<p class="sub">Several simulated wallets at once: does the server keep up, and does the proxy?</p>'
+                      '<h3>PIR server, direct</h3><p class="sub">Each wallet has its own PIR client. Lookups stay '
+                      'around 1.5–2.5 s from 1 to 16 wallets, so the server is not the limit.</p>'
                       + legend([("p50", C[0]), ("p95", C[1])], "line")
                       + line_chart([("p50", [(c, pct(by_c[c], .5)) for c in load_levels]),
                                     ("p95", [(c, pct(by_c[c], .95)) for c in load_levels])],
                                    "parallel wallets", fmt_ms)
-                      + table(["Parallel wallets", "Lookups", "Errors", "p50", "p95", "max", "Lookups / s"],
+                      + details_table(["Parallel wallets", "Lookups", "Errors", "p50", "p95", "max", "Lookups / s"],
                               [[c, len(by_c[c]), errs.get(c, 0), fmt_ms(pct(by_c[c], .5)), fmt_ms(pct(by_c[c], .95)),
                                 fmt_ms(max(by_c[c])), f"{thr[c]['throughput_per_s']:.2f}" if c in thr else "–"]
                                for c in load_levels]))
     if sess:
-        err_ref, level_rows = {}, []
+        err_ref, level_rows, lg = {}, [], {}
         for c in sorted({r["concurrency"] for r in sess}):
             lock = [e["pir"]["lock_wait_ms"] for e in replay_ev
                     if "pir" in e and e.get("session", "").startswith(f"replay:pir:c{c}:")]
@@ -809,17 +801,22 @@ def build(run: Path):
                     err_ref[l] = er
                 valid = "yes" if er <= err_ref[l] + 0.05 else "no: errors above the 1-wallet level"
                 ws = [r["wall_ms"] for r in sess if r["label"] == l and r["concurrency"] == c]
+                lg.setdefault(c, {})[l] = (pct(ws, .5), valid == "yes")
                 level_rows.append([c, NAMES[l], len(rs_), f"{er:.0%}", fmt_ms(pct(ws, .5)),
                                    fmt_ms(pct(lock, .5)) if l == "pir" and lock else "–",
                                    fmt_ms(max(lock)) if l == "pir" and lock else "–", valid])
-        load_html += ('<h3>Through the proxy</h3><p class="sub">The same wallet commands replayed by 1, 4 and 16 wallets '
-                      'through one proxy. The proxy has a single PIR client, so lookups from different wallets wait in '
-                      'line (lock wait) and a session gets longer with every wallet added. This is a limit of how the '
-                      'proxy queries today, not of the server. Error rate counts JSON-RPC error bodies (archive refusals, '
-                      'rate limits); a level with a high error rate is not a valid comparison, because errors return '
-                      'fast.</p>'
-                      + table(["Parallel wallets", "Replay", "Requests", "Error rate", "Median session",
-                               "Proxy lock wait p50", "Lock wait max", "Valid"], level_rows, text_cols=(1, 7)))
+        load_groups = [(f"{c} wallet" + ("s" if c > 1 else ""),
+                        [lg[c].get("pir", (None,))[0], lg[c].get("baseline", (None,))[0]],
+                        ["", "" if lg[c].get("baseline", (0, True))[1] else "rate-limited, not comparable"],
+                        [None, None if lg[c].get("baseline", (0, True))[1] else "var(--insens)"])
+                       for c in sorted(lg)]
+        load_html += ('<h3>Through the proxy</h3><p class="sub">All wallets share the proxy\'s single PIR client, so '
+                      'lookups wait in line and sessions get longer with each wallet. Gray bars are rate-limited by '
+                      'the public RPC and not a fair comparison.</p>'
+                      + legend([("With PIR", C[0]), ("Without PIR", C[1]), ("Without PIR, rate-limited", "var(--insens)")])
+                      + grouped_hbar(load_groups, ["With PIR", "Without PIR"], fmt_ms, colors=[C[0], C[1]])
+                      + details_table(["Parallel wallets", "Replay", "Requests", "Error rate", "Median session",
+                                       "Proxy lock wait p50", "Lock wait max", "Valid"], level_rows, text_cols=(1, 7)))
     if load_html:
         parts.append(f'<section id="load"><h2>Under load</h2>{load_html}</section>')
 
@@ -865,25 +862,28 @@ PAGE = """<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
-h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:0 0 4px}h3{font-size:14px;margin:20px 0 4px}
+h1{font-size:22px;margin:0 0 6px}h2{font-size:17px;margin:0 0 10px}h3{font-size:14px;margin:32px 0 8px}
 html{scroll-behavior:smooth}section{scroll-margin-top:64px}
 #toc{position:sticky;top:0;z-index:5;display:flex;gap:4px;overflow-x:auto;padding:10px 0;margin:8px 0 0;background:var(--bg);border-bottom:1px solid var(--border);scrollbar-width:none}
 #toc a{flex:none;color:var(--ink2);text-decoration:none;font-size:13px;padding:5px 10px;border-radius:999px}
 #toc a:hover{background:var(--grid)}#toc a.on{background:var(--ink);color:var(--bg)}
 section.plain{background:none;border:0;padding:0}
-.insights{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:8px}
-.card{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.insights{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:12px}
+.card{display:flex;flex-direction:column;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
 .card:hover{border-color:var(--axis)}.card{position:relative}
-.info{position:absolute;top:12px;right:12px;width:20px;height:20px;border-radius:50%;border:1px solid var(--axis);background:var(--surface);color:var(--ink2);font:italic 600 12px/18px Georgia,serif;cursor:help;padding:0}
+.todo{display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:10px;border-top:1px solid var(--grid);font-size:13px}
+.todo b{font-weight:600;color:var(--ink)}
+.info{width:20px;height:20px;border-radius:50%;border:1px solid var(--axis);background:var(--surface);color:var(--ink2);font:italic 600 12px/18px Georgia,serif;cursor:help;padding:0}
 .info:hover,.info:focus-visible,.info.open{background:var(--ink);color:var(--bg);border-color:var(--ink);outline:none}
-.ct{padding-right:26px}.ct{font-weight:600;font-size:14px}.cv{font-size:22px;font-weight:600;margin:6px 0 4px}.cd{color:var(--ink2);font-size:13px}
+.ct{font-weight:600;font-size:14px}.cv{font-size:22px;font-weight:600;margin:6px 0 4px}.cd{color:var(--ink2);font-size:13px;line-height:1.55;flex:1}
 .todo{margin-top:10px;padding-top:8px;border-top:1px solid var(--grid);font-size:13px;color:var(--ink)}.todo span{display:block;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
-details.method{margin:6px 0 4px}details.method summary{font-size:14px;color:var(--ink)}details.method p{max-width:80ch;color:var(--ink2)}
+details.method{margin:6px 0 4px}details.method summary{font-size:14px;color:var(--ink)}details.method p{color:var(--ink2);line-height:1.6}
 .note{max-width:80ch;margin:8px 0 12px;padding:8px 12px;border-left:3px solid var(--axis);background:var(--surface);color:var(--ink2);font-size:13px}
-.lead{max-width:80ch;margin:4px 0 8px;color:var(--ink2)}a{color:var(--s1)}
+.lead{margin:4px 0 14px;color:var(--ink2);line-height:1.6}a{color:var(--s1)}
 code{font-size:12.5px;background:var(--grid);padding:1px 4px;border-radius:4px}
-.sub,.muted{color:var(--ink2);margin:0 0 12px;max-width:72ch}
-section{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 18px 12px;margin:16px 0;overflow-x:auto}
+.sub,.muted{color:var(--ink2);margin:0 0 14px;line-height:1.6}
+.keys{color:var(--ink2);margin:-6px 0 14px;padding-left:18px;line-height:1.6}.keys li{margin:2px 0}.keys b{color:var(--ink);font-weight:600}
+section{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:24px 24px 18px;margin:20px 0;overflow-x:auto}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;background:none;border:0;padding:0}
 .tile{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px}
 .tl{color:var(--ink2);font-size:13px}.tv{font-size:24px;font-weight:600;margin:4px 0}.ts{color:var(--muted);font-size:12px}
@@ -894,10 +894,10 @@ section{background:var(--surface);border:1px solid var(--border);border-radius:1
 .xhair{stroke:var(--muted);stroke-width:1}
 .legend{display:flex;flex-wrap:wrap;gap:14px;margin:4px 0;color:var(--ink2);font-size:12px}
 .lg{display:inline-flex;align-items:center;gap:6px}.key.rect{width:10px;height:10px;border-radius:2px}.key.line{width:14px;height:2px}
-table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}
+table{border-collapse:collapse;width:100%;margin:10px 0 16px;font-size:13px}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
 th{color:var(--ink2);font-weight:500}.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-details summary{cursor:pointer;color:var(--ink2);font-size:13px;margin:4px 0}
+details{margin:8px 0 4px}details summary{cursor:pointer;color:var(--ink2);font-size:13px;margin:6px 0}
 #tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.12);display:none;max-width:320px;z-index:10}
 #tip b{font-weight:600}
 </style></head><body><main>
@@ -914,8 +914,11 @@ details summary{cursor:pointer;color:var(--ink2);font-size:13px;margin:4px 0}
     Object.keys(links).forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});}
   var tip=document.getElementById('tip');
   document.querySelectorAll('.info[data-tip]').forEach(function(b){
-    function at(){var r=b.getBoundingClientRect();tip.textContent=b.getAttribute('data-tip');tip.style.whiteSpace='normal';tip.style.display='block';
-      tip.style.maxWidth='300px';var w=tip.offsetWidth;tip.style.left=Math.max(8,Math.min(r.right-w,innerWidth-w-8))+'px';tip.style.top=(r.bottom+8)+'px';}
+    function at(){var r=b.getBoundingClientRect();tip.textContent='';var h=document.createElement('b');h.textContent=b.getAttribute('data-title')||'';
+      h.style.display='block';h.style.marginBottom='4px';tip.appendChild(h);tip.appendChild(document.createTextNode(b.getAttribute('data-tip')));
+      tip.style.whiteSpace='normal';tip.style.lineHeight='1.5';tip.style.padding='10px 12px';tip.style.display='block';
+      tip.style.maxWidth='300px';var w=tip.offsetWidth,h2=tip.offsetHeight;tip.style.left=Math.max(8,Math.min(r.left-12,innerWidth-w-8))+'px';
+      tip.style.top=((r.bottom+8+h2>innerHeight)?(r.top-h2-8):(r.bottom+8))+'px';}
     function off(){if(!b.classList.contains('open'))tip.style.display='none';}
     b.addEventListener('pointerenter',at);b.addEventListener('pointerleave',off);
     b.addEventListener('focus',at);b.addEventListener('blur',function(){b.classList.remove('open');tip.style.display='none';});
@@ -924,7 +927,7 @@ details summary{cursor:pointer;color:var(--ink2);font-size:13px;margin:4px 0}
       b.classList.toggle('open');if(b.classList.contains('open'))at();else tip.style.display='none';});
   });
   document.addEventListener('scroll',function(){document.querySelectorAll('.info.open').forEach(function(o){o.classList.remove('open');});tip.style.display='none';},{passive:true});
-  function show(t,x,y){tip.textContent=t;tip.style.display='block';var w=tip.offsetWidth;tip.style.left=Math.min(x+12,innerWidth-w-8)+'px';tip.style.top=(y+12)+'px';}
+  function show(t,x,y){tip.textContent=t;tip.style.padding='';tip.style.lineHeight='';tip.style.display='block';var w=tip.offsetWidth;tip.style.left=Math.min(x+12,innerWidth-w-8)+'px';tip.style.top=(y+12)+'px';}
   function hide(){tip.style.display='none';}
   document.querySelectorAll('.mark[data-tip]').forEach(function(m){
     m.addEventListener('pointermove',function(e){show(m.getAttribute('data-tip'),e.clientX,e.clientY);});
