@@ -96,6 +96,46 @@ SERVABILITY = [
 ]
 
 
+# One-line descriptions of request groups, matched by prefix (first match wins).
+DESCRIPTIONS = [
+    ("eth_call · erc20 · balanceOf", "Token balance (USDC, USDT, DAI, ...) of one of your addresses. Reveals your "
+                                     "address and what you hold."),
+    ("eth_call · erc20", "Token metadata (decimals, symbol, name). Shows which tokens you look at."),
+    ("eth_chainId", "Asks which chain the RPC serves (always mainnet). kohaku-cli's safety check, repeated for each "
+                    "RPC client it creates."),
+    ("eth_blockNumber", "Current chain head, used to know how far to sync. Same for everyone."),
+    ("eth_getCode", "Fetches a contract's code to check it exists. Only public protocol contracts here."),
+    ("eth_getLogs", "Reads all events of a public contract over a block range (stealth announcements, Privacy Pools), "
+                    "not just yours."),
+    ("eth_call · privacy · denomination", "A Tornado pool's fixed deposit size (for example 0.1 ETH). A public "
+                                          "constant."),
+    ("eth_call · privacy · ROOT_HISTORY_SIZE", "How many recent Merkle roots a Tornado pool keeps. A public constant."),
+    ("eth_call · privacy · instances", "A Tornado pool's settings from the instance registry (token, size, state). "
+                                       "Public."),
+    ("eth_call · privacy · getAllInstanceAddresses", "The list of all Tornado pools from the registry. Public."),
+    ("eth_call · privacy · isSpent", "Whether a specific note was already withdrawn. Reveals which note is yours."),
+    ("eth_call · privacy · isKnownRoot", "Whether a Merkle root is recent. Can link a withdrawal to its proof."),
+    ("eth_call · privacy", "A view call on a privacy-protocol contract with no address of yours in it."),
+    ("eth_call · names · reverseResolve", "GNS / WNS reverse lookup: which name belongs to your address. Reveals "
+                                          "your address."),
+    ("eth_call · ens · reverseWithGateways", "ENS reverse lookup (primary name) of your address through the "
+                                             "universal resolver. Reveals your address."),
+    ("eth_call · ens", "An ENS record lookup."),
+    ("eth_call · stealth · stealthMetaAddressOf", "Your stealth meta-address in the ERC-6538 registry. Carries your "
+                                                  "address; gray by decision, because private stealth reads need OMR."),
+    ("eth_call · dex", "A DEX pool, pair or price query. Shows which pair you care about."),
+    ("eth_call · oracle", "A price-feed read. Shows which asset you care about."),
+    ("eth_call · multicall", "A batch of contract calls in one request; see the inner calls."),
+]
+
+
+def describe(cat):
+    for prefix, text in DESCRIPTIONS:
+        if cat.startswith(prefix):
+            return text
+    return "No description yet: an unidentified call."
+
+
 def servability(cat):
     for prefix, note in SERVABILITY:
         if cat.startswith(prefix):
@@ -296,11 +336,19 @@ def line_chart(series, x_label, y_fmt, width=720, height=240, x_fmt=str):
     return "".join(out)
 
 
+class Raw(str):
+    """Table cell holding trusted HTML (built by this script, values escaped)."""
+
+
+def cell(c):
+    return c if isinstance(c, Raw) else esc(c)
+
+
 def table(headers, rows, num_from=1, text_cols=()):
     isnum = lambda i: i >= num_from and i not in text_cols
     th = "".join(f'<th class="{"num" if isnum(i) else ""}">{esc(h)}</th>' for i, h in enumerate(headers))
     body = "".join(
-        "<tr>" + "".join(f'<td class="{"num" if isnum(i) else ""}">{esc(c)}</td>' for i, c in enumerate(r)) + "</tr>"
+        "<tr>" + "".join(f'<td class="{"num" if isnum(i) else ""}">{cell(c)}</td>' for i, c in enumerate(r)) + "</tr>"
         for r in rows)
     return f'<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>'
 
@@ -646,11 +694,15 @@ def build(run: Path):
                  + stacked_hbar([(k, [v["sens"], v["n"] - v["sens"]], f"{fmt_ms(v['ms'])} total") for k, v in ranked[:14]],
                                 ["privacy-sensitive", "no private input"], lambda x: f"{x:.0f}",
                                 colors=[C[1], "var(--insens)"])
-                 + table(["Request group", "Requests", "Share", "Privacy-sensitive", "Why", "Top targets", "Private route"],
-                         [[k, v["n"], f"{v['n'] / len(fb):.0%}", v["sens"], ", ".join(v["why"]) or "–",
+                 + table(["Request group", "Requests", "Share", "Privacy", "Top targets", "Private route"],
+                         [[Raw(f'{esc(k)} <button type="button" class="info" aria-label="What is this" '
+                               f'data-title="{esc(k)}" data-tip="{esc(describe(k))}">i</button>'),
+                           v["n"], f"{v['n'] / len(fb):.0%}",
+                           ("Sensitive: " if v["sens"] == v["n"] else f"{v['sens']} of {v['n']} sensitive: ")
+                           + ", ".join(v["why"]) if v["sens"] else "No private input",
                            ", ".join(f"{t} ×{n}" for t, n in v["targets"].most_common(3)),
                            servability(k) if v["sens"] else (servability(k) if k.startswith("eth_call · stealth") else "not needed: no private input")]
-                          for k, v in ranked], text_cols=(4, 5, 6))
+                          for k, v in ranked], text_cols=(3, 4, 5))
                  + "</section>")
 
     inner = Counter()
@@ -873,6 +925,7 @@ section.plain{background:none;border:0;padding:0}
 .card:hover{border-color:var(--axis)}.card{position:relative}
 .todo{display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:10px;border-top:1px solid var(--grid);font-size:13px}
 .todo b{font-weight:600;color:var(--ink)}
+td .info{display:inline-block;vertical-align:-4px;margin-left:4px;width:18px;height:18px;font-size:11px;line-height:16px}
 .info{width:20px;height:20px;border-radius:50%;border:1px solid var(--axis);background:var(--surface);color:var(--ink2);font:italic 600 12px/18px Georgia,serif;cursor:help;padding:0}
 .info:hover,.info:focus-visible,.info.open{background:var(--ink);color:var(--bg);border-color:var(--ink);outline:none}
 .ct{font-weight:600;font-size:14px}.cv{font-size:22px;font-weight:600;margin:6px 0 4px}.cd{color:var(--ink2);font-size:13px;line-height:1.55;flex:1}
