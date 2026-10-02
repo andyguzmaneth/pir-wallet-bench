@@ -88,7 +88,7 @@ SERVABILITY = [
     ("eth_call · erc20", "token metadata: public, cacheable"),
     ("eth_call · ens", "ens-records tier"),
     ("eth_call · names", "name-records tier (GNS / WNS reverse lookups)"),
-    ("eth_call · stealth", "stealth tier"),
+    ("eth_call · stealth", "needs OMR (oblivious message retrieval), not PIR"),
     ("eth_call · privacy", "privacy-protocol-state tier"),
     ("eth_call · oracle", "public price data; cacheable"),
     ("eth_call · dex", "public pool data; cacheable"),
@@ -310,7 +310,8 @@ def details_table(headers, rows, num_from=1, summary="Table view"):
 def insight(title, value, detail, anchor, todo=""):
     return (f'<a class="card" href="#{anchor}"><div class="ct">{esc(title)}</div><div class="cv">{esc(value)}</div>'
             f'<div class="cd">{esc(detail)}</div>'
-            + (f'<div class="todo"><span>What we can do</span>{esc(todo)}</div>' if todo else "") + '</a>')
+            + (f'<button type="button" class="info" aria-label="What we can do" '
+               f'data-tip="What we can do: {esc(todo)}">i</button>' if todo else "") + '</a>')
 
 
 METHOD = (
@@ -340,6 +341,13 @@ EXCLUDED_METHODS: set = set()
 
 # Contract calls that reveal a specific note or deposit even without an address.
 SENSITIVE_FNS = {"isSpent", "nullifierHashes", "isKnownRoot"}
+# Calls that reveal intent: which tokens or trading pairs the user cares about.
+INTENT_KINDS = {"dex", "oracle"}
+INTENT_FNS = {"decimals", "symbol", "name", "totalSupply"}
+# Treated as privacy-insensitive by decision: stealth-address privacy needs
+# oblivious message retrieval (OMR), not PIR; today clients trial-decrypt every
+# announcement anyway.
+INSENSITIVE_KINDS = {"stealth"}
 
 
 def build(run: Path):
@@ -390,14 +398,23 @@ def build(run: Path):
         return bool(hidden) and any(a in blob for a in hidden)
     exposing = [e for e in fb if exposes(e)]
 
-    def sensitive(e):
-        """Privacy-sensitive: the request carries something about the user (one of
-        their addresses, or a note-specific check). Insensitive: no user input, the
-        same request for everyone (chain id, block number, public protocol state)."""
+    def why_sensitive(e):
+        """Why a request is privacy-sensitive, or "" if it carries nothing about the user."""
+        call = e.get("call") or {}
+        kind = call.get("fn_kind") or call.get("to_kind") or ""
+        fn = (call.get("fn") or "").split("(")[0]
+        if kind in INSENSITIVE_KINDS:
+            return ""
         if is_pir(e) or exposes(e):
-            return True
-        fn = ((e.get("call") or {}).get("fn") or "").split("(")[0]
-        return fn in SENSITIVE_FNS
+            return "your address"
+        if fn in SENSITIVE_FNS:
+            return "a specific note"
+        if kind in INTENT_KINDS or (kind == "erc20" and fn in INTENT_FNS):
+            return "intent: tokens or pairs you care about"
+        return ""
+
+    def sensitive(e):
+        return bool(why_sensitive(e))
     sens = [e for e in events if sensitive(e)]
     insens = [e for e in events if not sensitive(e)]
     fb_sens = [e for e in fb if sensitive(e)]
@@ -456,13 +473,15 @@ def build(run: Path):
                 ratios.append((sname, v["pir"], v["baseline"]))
 
     # Fallback demand
-    cats = defaultdict(lambda: {"n": 0, "ms": 0.0, "targets": Counter(), "exp": 0, "sens": 0})
+    cats = defaultdict(lambda: {"n": 0, "ms": 0.0, "targets": Counter(), "exp": 0, "sens": 0, "why": Counter()})
     for e in fb:
         cat, target = fallback_category(e)
         c = cats[cat]
         c["n"] += 1
         c["exp"] += exposes(e)
         c["sens"] += sensitive(e)
+        if why_sensitive(e):
+            c["why"][why_sensitive(e)] += 1
         c["ms"] += e["total_ms"]
         if target:
             c["targets"][target] += 1
@@ -520,12 +539,12 @@ def build(run: Path):
                    f"{fmt_ms(r0['lookup_ms'])} to {fmt_ms(r2['lookup_ms'])}.")
     cards = [
         insight("Share of privacy-sensitive requests that go to PIR", f"{len(pir) / len(sens):.0%}",
-                f"{len(pir)} of {len(sens)} requests that carry one of your addresses or notes. PIR holds latest-block "
+                f"{len(pir)} of {len(sens)} requests that carry one of your addresses, a specific note, or your intent (tokens or pairs you look up). PIR holds latest-block "
                 f"ETH balance and nonce, so that is all it can answer today; the other {len(fb_sens)} still go to a "
                 f"public RPC. Not counted: {len(insens)} requests with no private input (chain id, block number, "
                 "public protocol state), shown in gray.", "requests",
-                "We are actively adding the next datasets: ERC-20 balances, name records (ENS / GNS / WNS) and the "
-                "stealth registry, which together cover most of the remaining sensitive requests."),
+                "We are actively adding the next datasets: ERC-20 balances and name records (ENS / GNS / WNS), which "
+                "together cover most of the remaining sensitive requests."),
         insight("One PIR lookup vs the same request over a public RPC", f"{fmt_ms(bal_pir)} vs {fmt_ms(bal_pub)}",
                 f"eth_getBalance, median: {bal_pir / bal_pub:.0f}× slower. A lookup is one request for one address."
                 if bal_pir and bal_pub else "", "latency",
@@ -605,9 +624,11 @@ def build(run: Path):
     COL = [C[0], C[1], "var(--insens)"]
     parts.append('<section id="requests"><h2>Time per request, by route</h2>'
                  '<p class="sub">Median time of one request in each wallet action. Privacy-sensitive requests carry one '
-                 'of your addresses or a note-specific check; gray requests have no private input and are the same for '
-                 'every user (chain id, block number, public protocol state). Each bar is a single request, so they are '
-                 'compared, not added.</p>'
+                 'of your addresses, a note-specific check, or your intent (which tokens or trading pairs you look '
+                 'up); gray requests have no private input and are the same for every user (chain id, block number, '
+                 'public protocol state). Stealth-registry reads count as gray: making stealth addresses private needs '
+                 'oblivious message retrieval, not PIR. Each bar is a single request, so they are compared, not '
+                 'added.</p>'
                  + legend(list(zip(SER, COL)))
                  + grouped_hbar(groups, SER, fmt_ms, colors=COL)
                  + "".join(f'<p class="sub">Not shown: {esc(n)} {esc(LOCAL_NOTES.get(n, "makes no PIR lookups"))} '
@@ -624,11 +645,11 @@ def build(run: Path):
                  + stacked_hbar([(k, [v["sens"], v["n"] - v["sens"]], f"{fmt_ms(v['ms'])} total") for k, v in ranked[:14]],
                                 ["privacy-sensitive", "no private input"], lambda x: f"{x:.0f}",
                                 colors=[C[1], "var(--insens)"])
-                 + table(["Request group", "Requests", "Share", "Privacy-sensitive", "Top targets", "Private route"],
-                         [[k, v["n"], f"{v['n'] / len(fb):.0%}", v["sens"],
+                 + table(["Request group", "Requests", "Share", "Privacy-sensitive", "Why", "Top targets", "Private route"],
+                         [[k, v["n"], f"{v['n'] / len(fb):.0%}", v["sens"], ", ".join(v["why"]) or "–",
                            ", ".join(f"{t} ×{n}" for t, n in v["targets"].most_common(3)),
-                           servability(k) if v["sens"] else "not needed: no private input"]
-                          for k, v in ranked], text_cols=(4, 5))
+                           servability(k) if v["sens"] else (servability(k) if k.startswith("eth_call · stealth") else "not needed: no private input")]
+                          for k, v in ranked], text_cols=(4, 5, 6))
                  + "</section>")
 
     inner = Counter()
@@ -852,7 +873,10 @@ html{scroll-behavior:smooth}section{scroll-margin-top:64px}
 section.plain{background:none;border:0;padding:0}
 .insights{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:8px}
 .card{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
-.card:hover{border-color:var(--axis)}.ct{font-weight:600;font-size:14px}.cv{font-size:22px;font-weight:600;margin:6px 0 4px}.cd{color:var(--ink2);font-size:13px}
+.card:hover{border-color:var(--axis)}.card{position:relative}
+.info{position:absolute;top:12px;right:12px;width:20px;height:20px;border-radius:50%;border:1px solid var(--axis);background:var(--surface);color:var(--ink2);font:italic 600 12px/18px Georgia,serif;cursor:help;padding:0}
+.info:hover,.info:focus-visible,.info.open{background:var(--ink);color:var(--bg);border-color:var(--ink);outline:none}
+.ct{padding-right:26px}.ct{font-weight:600;font-size:14px}.cv{font-size:22px;font-weight:600;margin:6px 0 4px}.cd{color:var(--ink2);font-size:13px}
 .todo{margin-top:10px;padding-top:8px;border-top:1px solid var(--grid);font-size:13px;color:var(--ink)}.todo span{display:block;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
 details.method{margin:6px 0 4px}details.method summary{font-size:14px;color:var(--ink)}details.method p{max-width:80ch;color:var(--ink2)}
 .note{max-width:80ch;margin:8px 0 12px;padding:8px 12px;border-left:3px solid var(--axis);background:var(--surface);color:var(--ink2);font-size:13px}
@@ -889,6 +913,17 @@ details summary{cursor:pointer;color:var(--ink2);font-size:13px;margin:4px 0}
     if(a){a.classList.add('on');a.scrollIntoView({block:'nearest',inline:'nearest'});}}});},{rootMargin:'-70px 0px -70% 0px'});
     Object.keys(links).forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});}
   var tip=document.getElementById('tip');
+  document.querySelectorAll('.info[data-tip]').forEach(function(b){
+    function at(){var r=b.getBoundingClientRect();tip.textContent=b.getAttribute('data-tip');tip.style.whiteSpace='normal';tip.style.display='block';
+      tip.style.maxWidth='300px';var w=tip.offsetWidth;tip.style.left=Math.max(8,Math.min(r.right-w,innerWidth-w-8))+'px';tip.style.top=(r.bottom+8)+'px';}
+    function off(){if(!b.classList.contains('open'))tip.style.display='none';}
+    b.addEventListener('pointerenter',at);b.addEventListener('pointerleave',off);
+    b.addEventListener('focus',at);b.addEventListener('blur',function(){b.classList.remove('open');tip.style.display='none';});
+    b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();
+      document.querySelectorAll('.info.open').forEach(function(o){if(o!==b)o.classList.remove('open');});
+      b.classList.toggle('open');if(b.classList.contains('open'))at();else tip.style.display='none';});
+  });
+  document.addEventListener('scroll',function(){document.querySelectorAll('.info.open').forEach(function(o){o.classList.remove('open');});tip.style.display='none';},{passive:true});
   function show(t,x,y){tip.textContent=t;tip.style.display='block';var w=tip.offsetWidth;tip.style.left=Math.min(x+12,innerWidth-w-8)+'px';tip.style.top=(y+12)+'px';}
   function hide(){tip.style.display='none';}
   document.querySelectorAll('.mark[data-tip]').forEach(function(m){
