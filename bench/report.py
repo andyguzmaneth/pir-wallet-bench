@@ -814,6 +814,8 @@ def build(run: Path):
                 ["PIR snapshot blocks seen", f"{min(snaps)}–{max(snaps)}" if snaps else "–"]]
     parts.append('<section id="run"><h2>Method &amp; run</h2>'
                  + '<details class="method"><summary>How we measured</summary>' + METHOD + '</details>'
+                 + '<p class="sub">To reproduce this run, see <a href="https://github.com/andyguzmaneth/pir-wallet-bench">'
+                   'github.com/andyguzmaneth/pir-wallet-bench</a>.</p>'
                  + '<h3>Run</h3>' + table(["Field", "Value"], run_rows, num_from=9)
                  + '<h3>Software versions</h3><p class="sub">The git commit of each codebase this run used, linked to '
                    'GitHub, so the run can be reproduced exactly.</p>'
