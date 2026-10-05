@@ -23,15 +23,15 @@ WALLET = "bench"
 
 # name -> list of kohaku argv tails. {common} expands to the shared flags.
 SCENARIOS = {
-    "create_wallet": [["create-wallet", WALLET, "--non-interactive", "{pw}", "--rpc-url", "{rpc}", "{dd}"]],
-    "fresh_addresses": [["next-fresh-address", "--wallet", WALLET, "--non-interactive", "{pw}", "{dd}"]],
+    "create_wallet": [["create-wallet", "{wallet}", "--non-interactive", "{pw}", "--rpc-url", "{rpc}", "{dd}"]],
+    "fresh_addresses": [["next-fresh-address", "--wallet", "{wallet}", "--non-interactive", "{pw}", "{dd}"]],
     "balances_public": [["balances", "{common}", "--skip-stealth-scan"]],
     "balances_stealth": [["balances", "{common}"]],
     "balances_tornado": [["balances", "{common}", "--skip-stealth-scan", "--include", "tornado"]],
     "balances_privacy_pools": [["balances", "{common}", "--skip-stealth-scan", "--include", "privacy-pools"]],
     "balances_railgun": [["balances", "{common}", "--skip-stealth-scan", "--include", "railgun"]],
     "balances_all_warm": [["balances", "{common}", "--include", "tornado,privacy-pools,railgun"]],
-    "see_stealth_meta_address": [["see-stealth-meta-address", "--wallet", WALLET, "--non-interactive", "{pw}", "{dd}"]],
+    "see_stealth_meta_address": [["see-stealth-meta-address", "--wallet", "{wallet}", "--non-interactive", "{pw}", "{dd}"]],
     # Send flows (testnet wallet with funds). Without --broadcast, kohaku-cli
     # still reads balance, nonce, the 7702 delegation (eth_getCode) and gas.
     "send_simulate": [["transfer", "{common}", "--from", "0", "--to", "{to}", "--amount-formatted", "0.0001"]],
@@ -70,6 +70,8 @@ def expand(tail, ctx):
             out += ctx[a[1:-1]]
         elif a == "{rpc}":
             out.append(ctx["rpc"])
+        elif a == "{wallet}":
+            out.append(WALLET)
         elif a == "{to}":
             out.append(ctx["to"])
         else:

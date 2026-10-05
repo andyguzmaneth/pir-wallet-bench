@@ -79,6 +79,12 @@ def fallback_category(e, mine=frozenset()):
     if m == "eth_getLogs":
         labels = [l for l in (e.get("logs") or {}).get("labels", []) if l]
         return "eth_getLogs", ", ".join(labels) or "unlabeled"
+    if m == "eth_sendRawTransaction":
+        return "eth_sendRawTransaction · broadcast", ""
+    if m in ("eth_getTransactionReceipt", "eth_getTransactionByHash"):
+        return f"{m} · your transaction", ""
+    if m in ("eth_estimateGas", "eth_fillTransaction"):
+        return f"{m} · your transaction draft", ""
     if m in ("eth_getBalance", "eth_getTransactionCount"):
         return f"{m} (non-latest)", str(e.get("block_tag"))
     return m, ""
@@ -90,6 +96,13 @@ SERVABILITY = [
     ("eth_gasPrice", "public; no private input"),
     ("eth_getLogs", "range query: not a PIR key lookup"),
     ("eth_getCode · your EOA", "account entry: delegate field (planned, same lookup cost)"),
+    ("eth_sendRawTransaction", "becomes public on-chain anyway; hide who sent it with network anonymity (anon-RPC), not PIR"),
+    ("eth_getTransactionReceipt", "a receipts-by-hash PIR table, or poll over anon-RPC"),
+    ("eth_getTransactionByHash", "a transactions-by-hash PIR table, or poll over anon-RPC"),
+    ("eth_estimateGas", "simulation needs execution, not a lookup: estimate locally or over anon-RPC"),
+    ("eth_fillTransaction", "fill nonce, fees and gas locally (nonce from PIR) instead of asking the RPC"),
+    ("eth_maxPriorityFeePerGas", "public fee data; no private input"),
+    ("eth_getBlockByNumber", "public block data; no private input"),
     ("eth_getCode · contract", "public contract code; no private input"),
     ("eth_call · erc20 · balanceOf", "erc20-balances tier (pir-state-pipeline)"),
     ("eth_call · erc20", "token metadata: public, cacheable"),
@@ -111,6 +124,15 @@ DESCRIPTIONS = [
     ("eth_chainId", "Asks which chain the RPC serves (always mainnet). kohaku-cli's safety check, repeated for each "
                     "RPC client it creates."),
     ("eth_blockNumber", "Current chain head, used to know how far to sync. Same for everyone."),
+    ("eth_sendRawTransaction", "Broadcasts your signed transaction. It becomes public on-chain, but the RPC also learns "
+                               "the IP that sent it."),
+    ("eth_getTransactionReceipt", "Polls for your transaction's receipt after sending. Shows the RPC which transaction "
+                                  "is yours."),
+    ("eth_getTransactionByHash", "Looks up your just-sent transaction. Shows the RPC which transaction is yours."),
+    ("eth_estimateGas", "Simulates your transaction (from, to, value) to price gas. Reveals the draft before you send."),
+    ("eth_fillTransaction", "Asks the RPC to fill nonce, fees and gas for your transaction draft. Reveals the draft."),
+    ("eth_maxPriorityFeePerGas", "Current tip suggestion. Same for everyone."),
+    ("eth_getBlockByNumber", "Reads a block (fee data or chain head). Same for everyone."),
     ("eth_getCode · your EOA", "Reads the code at your own address to check for an EIP-7702 delegation. Reveals "
                                "your address. Planned: the delegate address rides in the PIR account entry."),
     ("eth_getCode", "Fetches a public contract's code to check it exists."),
@@ -460,6 +482,10 @@ def build(run: Path):
 
     def why_sensitive(e):
         """Why a request is privacy-sensitive, or "" if it carries nothing about the user."""
+        if e["method"] in ("eth_getTransactionReceipt", "eth_getTransactionByHash"):
+            return "your transaction (links you to it)"
+        if e["method"] == "eth_sendRawTransaction":
+            return "your transaction (broadcast)"
         call = e.get("call") or {}
         kind = call.get("fn_kind") or call.get("to_kind") or ""
         fn = (call.get("fn") or "").split("(")[0]
