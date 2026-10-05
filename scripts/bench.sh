@@ -106,4 +106,5 @@ if has report; then
   echo "== report"
   python3 bench/report.py "$RUN"
   scripts/serve-reports.sh || true
+  if [[ ${PUBLISH_PAGES:-1} == 1 ]]; then scripts/publish-pages.sh || echo "   (pages publish failed)"; fi
 fi

@@ -84,18 +84,13 @@ The patches are local. Nothing is pushed upstream.
 
 ## Viewing reports
 
-`scripts/serve-reports.sh` runs after each `make bench`. It copies each
-`report.html` into two folders. The folders hold report pages only, never wallet
-data.
+Reports are published to GitHub Pages: https://andyguzmaneth.github.io/pir-wallet-bench/
 
-- `runs/_site/`: the full copy, served on the machine's Tailscale address at
-  port 8790 (tailnet only).
-- `runs/_public/`: the same pages with IP addresses replaced, served on
-  127.0.0.1:8791. To publish it, put Tailscale Funnel in front of it:
-  `sudo tailscale funnel --bg --https=10000 http://127.0.0.1:8791`.
-
-Funnel opens a whole port. Use a port that carries no other service. To stop
-it, run `sudo tailscale funnel --https=10000 off`.
+After each run, `scripts/serve-reports.sh` copies each `report.html` into
+`runs/_site/` (full copy, served on the Tailscale address at port 8790) and
+`runs/_public/` (IP addresses replaced). Then `scripts/publish-pages.sh` pushes
+`runs/_public/` to the `gh-pages` branch. Set `PUBLISH_PAGES=0` to skip it.
+The index page compares any two runs.
 
 ## Reproducing a run
 
