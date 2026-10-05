@@ -61,10 +61,16 @@ def is_pir(e):
     return e["route"] != "Fallback"
 
 
-def fallback_category(e):
-    """Group a fallback request by what it asks for, and what it would take to serve it privately."""
+def fallback_category(e, mine=frozenset()):
+    """Group a fallback request by what it asks for, and what it would take to serve it privately.
+    `mine`: the wallet's own addresses (hex, no 0x)."""
     m = e["method"]
     call = e.get("call") or {}
+    if m == "eth_getCode":
+        a = str((e.get("params") or [""])[0]).lower().removeprefix("0x")
+        if a in mine:
+            return "eth_getCode · your EOA (7702 delegation check)", "your address"
+        return "eth_getCode · contract", ""
     if m == "eth_call":
         kind = call.get("fn_kind") or call.get("to_kind") or "unknown"
         fn = (call.get("fn") or call.get("selector") or "?").split("(")[0]
@@ -83,7 +89,8 @@ SERVABILITY = [
     ("eth_blockNumber", "public head; no private input"),
     ("eth_gasPrice", "public; no private input"),
     ("eth_getLogs", "range query: not a PIR key lookup"),
-    ("eth_getCode", "code-hash per address: candidate PIR table"),
+    ("eth_getCode · your EOA", "account entry: delegate field (planned, same lookup cost)"),
+    ("eth_getCode · contract", "public contract code; no private input"),
     ("eth_call · erc20 · balanceOf", "erc20-balances tier (pir-state-pipeline)"),
     ("eth_call · erc20", "token metadata: public, cacheable"),
     ("eth_call · ens", "ens-records tier"),
@@ -104,7 +111,9 @@ DESCRIPTIONS = [
     ("eth_chainId", "Asks which chain the RPC serves (always mainnet). kohaku-cli's safety check, repeated for each "
                     "RPC client it creates."),
     ("eth_blockNumber", "Current chain head, used to know how far to sync. Same for everyone."),
-    ("eth_getCode", "Fetches a contract's code to check it exists. Only public protocol contracts here."),
+    ("eth_getCode · your EOA", "Reads the code at your own address to check for an EIP-7702 delegation. Reveals "
+                               "your address. Planned: the delegate address rides in the PIR account entry."),
+    ("eth_getCode", "Fetches a public contract's code to check it exists."),
     ("eth_getLogs", "Reads all events of a public contract over a block range (stealth announcements, Privacy Pools), "
                     "not just yours."),
     ("eth_call · privacy · denomination", "A Tornado pool's fixed deposit size (for example 0.1 ETH). A public "
@@ -526,7 +535,7 @@ def build(run: Path):
     # Fallback demand
     cats = defaultdict(lambda: {"n": 0, "ms": 0.0, "targets": Counter(), "exp": 0, "sens": 0, "why": Counter()})
     for e in fb:
-        cat, target = fallback_category(e)
+        cat, target = fallback_category(e, hidden)
         c = cats[cat]
         c["n"] += 1
         c["exp"] += exposes(e)
@@ -594,8 +603,9 @@ def build(run: Path):
                 f"ETH balance and nonce, so that is all it can answer today; the other {len(fb_sens)} still go to a "
                 f"public RPC. Not counted: {len(insens)} requests with no private input (chain id, block number, "
                 "public protocol state), shown in gray.", "requests",
-                "We are actively adding the next datasets: ERC-20 balances and name records (ENS / GNS / WNS), which "
-                "together cover most of the remaining sensitive requests."),
+                "Actively adding: ERC-20 balances and name records (ENS / GNS / WNS). Planned: the EIP-7702 delegate "
+                "address inside the account entry, so balance, nonce and the eth_getCode delegation check come from "
+                "one lookup at today's cost."),
         insight("One PIR lookup vs the same request over a public RPC", f"{fmt_ms(bal_pir)} vs {fmt_ms(bal_pub)}",
                 f"eth_getBalance, median: {bal_pir / bal_pub:.0f}× slower. A lookup is one request for one address."
                 if bal_pir and bal_pub else "", "latency",
@@ -611,8 +621,10 @@ def build(run: Path):
                              f"{fmt_ms(d_['Network round trip'])}; server compute only {fmt_ms(d_['Server compute'])}. "
                              "The link is fast (about 85 Mbit/s each way here), but every lookup opens a new connection "
                              "on a 150 ms path, so TCP restarts its slow ramp-up each time.", "lookup",
-                             "Reuse one connection in the PIR client and turn off TCP's idle restart on client and "
-                             "server." + tcp_txt))
+                             "Send lookups as one batch per wallet refresh: 8 lookups in one request clear slow start "
+                             "in about 9 round trips instead of 48. Plain connection reuse helps without anon-RPC but "
+                             "links lookups that share a connection or Tor circuit, so the batch is the unit to optimize. "
+                             "Planned on the server: TCP idle restart off and BBR." + tcp_txt))
     if wire_up:
         cards.append(insight("Data cost per lookup", f"~{fmt_bytes(pct(wire_up, .5) + pct(wire_dn, .5))}",
                              f"Up {fmt_bytes(pct(wire_up, .5))}: two encrypted queries of fixed size, the same for any "
@@ -620,24 +632,27 @@ def build(run: Path):
                              "two encrypted answers plus the sidecar (every account change since the last database "
                              f"rebuild, sent to every client). A public-RPC request is {fmt_bytes(pct(rpc_up, .5))} up, "
                              f"{fmt_bytes(pct(rpc_dn, .5))} down.", "lookup",
-                             "Shrinking the encrypted queries (for example one query instead of two) needs research or "
-                             "changes to the architecture, so it is the hardest lever. The sidecar is easier: send it "
-                             "in binary, once per block, instead of as hex JSON on every lookup."))
+                             "Planned: gzip and a binary sidecar, ~211 KB to ~65 KB down (~970 KB to ~800 KB per "
+                             "lookup). A fixed-size padded batch sends the sidecar once per batch, but padding adds "
+                             "upload for wallets with few addresses. Shrinking the encrypted queries (one instead of "
+                             "two) needs research or changes to the architecture."))
     if ratios:
         rs = sorted(r[1] / r[2] for r in ratios)
         cards.append(insight("A whole wallet action (kohaku balances) with vs without PIR",
                              f"{rs[0]:.1f}×–{rs[-1]:.1f}× longer",
                              f"One balances command is {min(n_all)}–{max(n_all)} requests, of which {max(n_bal)} are PIR "
                              "lookups, one per wallet address, run one after another. Replay at 1 wallet.", "wallet",
-                             "Run the lookups in parallel, or batch several addresses into one request, so a command "
-                             "pays the network cost once instead of once per address."))
+                             "A cache in the middleware: one lookup per address per block answers balance, nonce and "
+                             "the delegation check. With one padded batch per refresh for all wallet addresses, a "
+                             "command waits about one batch instead of one lookup per address."))
     if hi and proxy_hi:
         cards.append(insight("The PIR server handles parallel wallets; the proxy does not",
                              f"{fmt_ms(pct(by_c[hi], .5))} vs {fmt_ms(proxy_hi[3])}",
                              f"Lookup median with {hi} parallel clients hitting the server directly, vs the median wait "
                              f"for the proxy's single PIR client at {proxy_hi[0]} wallets.", "load",
-                             "Keep developing the query path: several PIR clients instead of one, and batched queries. "
-                             "The proxy may also move into Kohaku itself instead of running as a separate service."))
+                             "A pool of PIR clients removes the queue (PR open: 6.7 s to 1.0 s per lookup at 4 "
+                             "wallets, 28 s to 1.2 s at 16). If the proxy moves into Kohaku, it needs the wallet's "
+                             "address list up front to send one padded batch per refresh."))
     if ranked:
         k, v = max(((k, v) for k, v in ranked if v.get("sens")), key=lambda kv: kv[1]["sens"], default=ranked[0])
         cards.append(insight("Largest privacy-sensitive request type PIR does not hold yet",
@@ -651,6 +666,10 @@ def build(run: Path):
                  'request to a public RPC. A patched proxy logged each request: which route served it, how long it '
                  'took, and how many bytes it moved. We then replayed the same traffic with and without PIR, and timed '
                  'each step of a PIR lookup to see where the time goes.</p>'
+                 + ('<p class="note"><b>Testnet run (Sepolia), shadow mode.</b> Every balance and nonce request still '
+                    'makes the full PIR lookup to the mainnet PIR server, timed and counted as below. The wallet gets '
+                    'its answer from the Sepolia RPC, because the PIR server holds mainnet state only.</p>'
+                    if meta.get("network") == "sepolia" else "")
                  + f'<div class="insights">{"".join(cards)}</div></section>')
 
     # --- request time per wallet action (side by side, not additive)
@@ -892,11 +911,23 @@ def build(run: Path):
                  + f'<table><thead><tr><th>Codebase</th><th>Commit</th></tr></thead><tbody>{ver_rows}</tbody></table>'
                  + "</section>")
 
-    summary.update({"pir_balance_p50_ms": bal_pir, "public_balance_p50_ms": bal_pub})
+    summary.update({
+        "pir_balance_p50_ms": bal_pir, "public_balance_p50_ms": bal_pub,
+        "network": meta.get("network", "mainnet"), "label": meta.get("label", ""), "note": meta.get("note", ""),
+        "started_utc": meta.get("started_utc", ""),
+        "sensitive_requests": len(sens), "sensitive_share_pir": len(pir) / len(sens) if sens else None,
+        "insensitive_requests": len(insens),
+        "lookup_steps_ms": {n: v for n, v, _ in steps} if steps else None,
+        "wallet_action_ratio_min": min((r[1] / r[2] for r in ratios), default=None),
+        "wallet_action_ratio_max": max((r[1] / r[2] for r in ratios), default=None),
+        "direct_load_p50_ms": {str(c): pct(by_c[c], .5) for c in load_levels},
+        "proxy_lock_wait_p50_ms_at_max": proxy_hi[3] if proxy_hi else None,
+        "pir_methods": dict(Counter(e["method"] for e in pir)),
+    })
     nav_html = "".join(f'<a href="#{i}">{esc(t)}</a>' for i, t in nav if f'id="{i}"' in "".join(parts))
     parts.insert(0, f'<nav id="toc">{nav_html}</nav>')
     (run / "summary.json").write_text(json.dumps(summary, indent=1))
-    title = f"PIR wallet bench · {run.name}"
+    title = f"PIR wallet bench · {run.name}" + (f" · {meta['label']}" if meta.get("label") else "")
     (run / "report.html").write_text(PAGE.replace("{{TITLE}}", esc(title)).replace("{{BODY}}", "\n".join(parts)))
     return run / "report.html"
 

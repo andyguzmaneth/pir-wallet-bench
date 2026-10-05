@@ -32,7 +32,14 @@ SCENARIOS = {
     "balances_railgun": [["balances", "{common}", "--skip-stealth-scan", "--include", "railgun"]],
     "balances_all_warm": [["balances", "{common}", "--include", "tornado,privacy-pools,railgun"]],
     "see_stealth_meta_address": [["see-stealth-meta-address", "--wallet", WALLET, "--non-interactive", "{pw}", "{dd}"]],
+    # Send flows (testnet wallet with funds). Without --broadcast, kohaku-cli
+    # still reads balance, nonce, the 7702 delegation (eth_getCode) and gas.
+    "send_simulate": [["transfer", "{common}", "--from", "0", "--to", "{to}", "--amount-formatted", "0.0001"]],
+    "send_broadcast": [["transfer", "{common}", "--from", "0", "--to", "{to}", "--amount-formatted", "0.0001",
+                        "--broadcast"]],
 }
+SCENARIOS["balances_after_send"] = SCENARIOS["balances_public"]
+SEPOLIA_ORDER = ["fresh_addresses", "balances_public", "send_simulate", "send_broadcast", "balances_after_send"]
 DEFAULT_ORDER = [
     "create_wallet",
     "fresh_addresses",
@@ -63,12 +70,15 @@ def expand(tail, ctx):
             out += ctx[a[1:-1]]
         elif a == "{rpc}":
             out.append(ctx["rpc"])
+        elif a == "{to}":
+            out.append(ctx["to"])
         else:
             out.append(a)
     return out
 
 
 def main() -> int:
+    global WALLET
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", required=True, type=Path)
     ap.add_argument("--proxy", default="http://127.0.0.1:18545")
@@ -79,15 +89,22 @@ def main() -> int:
     ap.add_argument("--node", default=str(ROOT / ".tools/node/bin/node"))
     ap.add_argument("--kohaku", default=str(ROOT / "vendor/kohaku-cli/bin/kohaku.mjs"))
     ap.add_argument("--tor", action="store_true", help="keep Tor for non-RPC HTTP (slower; RPC is clearnet either way)")
+    ap.add_argument("--network", choices=["mainnet", "sepolia"], default="mainnet")
+    ap.add_argument("--wallet-dir", type=Path,
+                    help="reuse a persistent wallet (data/ + password inside), e.g. a funded testnet wallet")
+    ap.add_argument("--wallet-name", default=WALLET)
     args = ap.parse_args()
 
     run = args.run_dir
     (run / "drive").mkdir(parents=True, exist_ok=True)
-    data_dir = run / "kohaku-data"
-    pw_file = run / "wallet-password"
-    if not pw_file.exists():
-        pw_file.write_text(secrets.token_hex(16))
-        pw_file.chmod(0o600)
+    WALLET = args.wallet_name
+    if args.wallet_dir:
+        data_dir, pw_file = args.wallet_dir / "data", args.wallet_dir / "password"
+    else:
+        data_dir, pw_file = run / "kohaku-data", run / "wallet-password"
+        if not pw_file.exists():
+            pw_file.write_text(secrets.token_hex(16))
+            pw_file.chmod(0o600)
     ctx = {"pw": ["--password-file", str(pw_file)], "dd": ["--dataDir", str(data_dir)], "rpc": args.proxy}
 
     env = dict(os.environ)
@@ -97,7 +114,20 @@ def main() -> int:
     if not args.tor:
         env["KOHAKU_WITHOUT_TOR"] = "1"
 
+    if args.network == "sepolia" and args.scenarios == ",".join(DEFAULT_ORDER):
+        args.scenarios = ",".join(SEPOLIA_ORDER)
     names = [s for s in args.scenarios.split(",") if s]
+    if any(n.startswith("send_") for n in names):
+        # Recipient: the wallet's own next address, so test funds stay in the wallet.
+        peek = subprocess.run([args.node, args.kohaku, "next-fresh-address", "--peek", "--wallet", WALLET,
+                               "--non-interactive", *ctx["pw"], *ctx["dd"]],
+                              capture_output=True, text=True, env=env, timeout=120)
+        import re
+        m = re.findall(r"0x[0-9a-fA-F]{40}", peek.stdout)
+        if not m:
+            print(f"could not derive a recipient address: {peek.stdout[-300:]} {peek.stderr[-300:]}", file=sys.stderr)
+            return 2
+        ctx["to"] = m[-1]
     unknown = [s for s in names if s not in SCENARIOS]
     if unknown:
         print(f"unknown scenarios: {unknown}", file=sys.stderr)

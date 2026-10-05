@@ -17,6 +17,16 @@ done < bench.env
 STAGES=${STAGES:-drive,replay,load,report}
 PORT=${PORT:-18545}
 PROXY_URL=http://127.0.0.1:$PORT
+NETWORK=${NETWORK:-mainnet}
+PROXY_EXTRA=()
+DRIVE_EXTRA=()
+if [[ $NETWORK == sepolia ]]; then
+  # The PIR server holds mainnet state: shadow mode keeps PIR timing but
+  # answers from the Sepolia RPC. Sends use the persistent funded wallet.
+  ETH_RPC_URL=${SEPOLIA_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
+  PROXY_EXTRA=(--shadow-pir)
+  DRIVE_EXTRA=(--network sepolia --wallet-dir "${SEPOLIA_WALLET_DIR:-runs/_wallets/sepolia}" --wallet-name sepolia-bench)
+fi
 RUN=${RUN:-runs/$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "$RUN"
 PROXY_BIN=vendor/local-pir-rpc/target/release/local-pir-rpc
@@ -29,7 +39,7 @@ start_proxy() { # $1 events file
     echo "port $PORT is already in use; stop it or set PORT"; exit 1
   fi
   "$PROXY_BIN" --listen "127.0.0.1:$PORT" --pir-url "$PIR_URL" --rpc-url "$ETH_RPC_URL" \
-    --events "$1" --record-params --labels bench/labels.json >>"$RUN/proxy.log" 2>&1 &
+    --events "$1" --record-params --labels bench/labels.json "${PROXY_EXTRA[@]}" >>"$RUN/proxy.log" 2>&1 &
   PROXY_PID=$!
   for _ in $(seq 60); do
     curl -fs -o /dev/null -m 1 "$PROXY_URL/_bench/session" -H 'content-type: application/json' -d '{"session":""}' && return 0
@@ -44,7 +54,7 @@ stop_proxy() {
 }
 trap stop_proxy EXIT
 
-python3 - "$RUN/meta.json" <<PY
+NETWORK=$NETWORK python3 - "$RUN/meta.json" <<PY
 import json, os, subprocess, sys, time, urllib.parse
 u = urllib.parse.urlsplit(os.environ["ETH_RPC_URL"])
 rev = lambda d: subprocess.run(["git", "-C", d, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
@@ -56,6 +66,9 @@ meta.update({
     "pir_url": os.environ["PIR_URL"],
     "fallback_rpc": f"{u.scheme}://{u.hostname}",  # path/query dropped: may carry a key
     "stages": os.environ.get("STAGES", ""),
+    "network": os.environ.get("NETWORK", "mainnet"),
+    "label": os.environ.get("RUN_LABEL", meta.get("label", "")),
+    "note": os.environ.get("RUN_NOTE", meta.get("note", "")),
     "kohaku-cli": rev("vendor/kohaku-cli"), "local-pir-rpc": rev("vendor/local-pir-rpc"),
     "kohaku-rs": rev("vendor/kohaku-rs"), "inspire-gpu-serving": rev("vendor/inspire-gpu-serving"),
 })
@@ -68,6 +81,7 @@ if has drive; then
   args=(--run-dir "$RUN" --proxy "$PROXY_URL" --fresh "${FRESH:-5}" --timeout "${SCENARIO_TIMEOUT:-1500}")
   [[ -n ${SCENARIOS:-} ]] && args+=(--scenarios "$SCENARIOS")
   [[ ${TOR:-0} == 1 ]] && args+=(--tor)
+  args+=("${DRIVE_EXTRA[@]}")
   python3 bench/drive.py "${args[@]}" || echo "   (some scenarios failed; see $RUN/drive/)"
   stop_proxy
 fi

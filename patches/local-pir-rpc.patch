@@ -73,7 +73,7 @@ index 433954d..521a031 100644
      }
  }
 diff --git a/src/main.rs b/src/main.rs
-index 6760149..1e27bbb 100644
+index 6760149..98ab9c6 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -1,7 +1,12 @@
@@ -90,7 +90,7 @@ index 6760149..1e27bbb 100644
  
  use clap::Parser;
  use kohaku_pir_provider::PirRouter;
-@@ -24,6 +29,37 @@ struct Args {
+@@ -24,6 +29,42 @@ struct Args {
      /// Fallback Ethereum JSON-RPC URL (mainnet).
      #[arg(long, env = "ETH_RPC_URL")]
      rpc_url: String,
@@ -114,6 +114,11 @@ index 6760149..1e27bbb 100644
 +    /// Initial session tag (change it with POST /_bench/session).
 +    #[arg(long, default_value = "")]
 +    session: String,
++
++    /// Testnets: run PIR lookups for timing, but answer PIR-routed requests
++    /// from --rpc-url (the PIR server holds mainnet state only).
++    #[arg(long)]
++    shadow_pir: bool,
 +}
 +
 +fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> T {
@@ -128,7 +133,7 @@ index 6760149..1e27bbb 100644
  }
  
  #[tokio::main]
-@@ -59,17 +95,44 @@ async fn main() {
+@@ -59,17 +100,53 @@ async fn main() {
      );
  
      let lookup = Arc::new(PirLookup(Mutex::new(client)));
@@ -166,6 +171,15 @@ index 6760149..1e27bbb 100644
 +        session: RwLock::new(args.session.clone()),
 +        seq: AtomicU64::new(0),
 +        inflight: AtomicU64::new(0),
++        shadow: if args.shadow_pir {
++            info!("shadow mode: PIR answers replaced by the RPC's");
++            Some(kohaku_pir_provider::HttpFallback::new(&args.rpc_url).unwrap_or_else(|e| {
++                error!(error = %e, "shadow RPC");
++                std::process::exit(1);
++            }))
++        } else {
++            None
++        },
 +    });
 +
      let app = axum::Router::new()
@@ -177,10 +191,10 @@ index 6760149..1e27bbb 100644
      let listener = match tokio::net::TcpListener::bind(&args.listen).await {
          Ok(l) => l,
 diff --git a/src/server.rs b/src/server.rs
-index a85baae..f4ac8da 100644
+index a85baae..dd04c89 100644
 --- a/src/server.rs
 +++ b/src/server.rs
-@@ -1,19 +1,69 @@
+@@ -1,19 +1,73 @@
 -use std::sync::Arc;
 -use std::time::Instant;
 +use std::io::Write;
@@ -212,6 +226,10 @@ index a85baae..f4ac8da 100644
 +    pub session: RwLock<String>,
 +    pub seq: AtomicU64,
 +    pub inflight: AtomicU64,
++    /// Shadow mode (testnets): PIR-routed requests still run the full PIR
++    /// lookup, timed and logged, but the answer returned to the wallet comes
++    /// from this RPC. The PIR server holds mainnet state only.
++    pub shadow: Option<kohaku_pir_provider::HttpFallback>,
 +}
 +
 +pub type AppState = Arc<App>;
@@ -257,7 +275,7 @@ index a85baae..f4ac8da 100644
      body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
  ) -> impl IntoResponse {
      let Json(body) = match body {
-@@ -30,19 +80,44 @@ pub async fn handle_rpc(
+@@ -30,19 +84,44 @@ pub async fn handle_rpc(
                  .into_response();
          }
      };
@@ -284,8 +302,9 @@ index a85baae..f4ac8da 100644
  
 -    (StatusCode::OK, Json(dispatch_one(&router, &body).await)).into_response()
 +    (StatusCode::OK, Json(dispatch_one(&app, &body, &session, None).await)).into_response()
-+}
-+
+ }
+ 
+-async fn dispatch_one(router: &PirRouter, req: &Value) -> Value {
 +fn route_name(route: &Route) -> (&'static str, Option<String>) {
 +    match route {
 +        Route::AccountBalance => ("AccountBalance", None),
@@ -293,9 +312,8 @@ index a85baae..f4ac8da 100644
 +        Route::Call(m) => ("Call", Some(m.dataset_id.clone())),
 +        Route::Fallback => ("Fallback", None),
 +    }
- }
- 
--async fn dispatch_one(router: &PirRouter, req: &Value) -> Value {
++}
++
 +async fn dispatch_one(
 +    app: &App,
 +    req: &Value,
@@ -305,7 +323,7 @@ index a85baae..f4ac8da 100644
      let id = req.get("id").cloned().unwrap_or(Value::Null);
      let method = match req.get("method").and_then(|m| m.as_str()) {
          Some(m) => m,
-@@ -56,41 +131,76 @@ async fn dispatch_one(router: &PirRouter, req: &Value) -> Value {
+@@ -56,41 +135,87 @@ async fn dispatch_one(router: &PirRouter, req: &Value) -> Value {
      };
      let params = req.get("params").cloned().unwrap_or(Value::Array(vec![]));
  
@@ -319,8 +337,16 @@ index a85baae..f4ac8da 100644
      let start = Instant::now();
 -    let result = router.request(method, params).await;
 -    let elapsed_ms = start.elapsed().as_millis();
-+    let (result, pir) = app.router.request_traced(method, params).await;
++    let shadow_params = app.shadow.as_ref().map(|_| params.clone());
++    let (mut result, pir) = app.router.request_traced(method, params).await;
 +    let elapsed = start.elapsed();
++    let mut shadow_ms = None;
++    if let (Some(fb), Some(p), false) = (&app.shadow, shadow_params, matches!(route, Route::Fallback)) {
++        use kohaku_pir_provider::FallbackRpc;
++        let t = Instant::now();
++        result = fb.request(method, p).await;
++        shadow_ms = Some(t.elapsed().as_secs_f64() * 1e3);
++    }
 +    app.inflight.fetch_sub(1, Ordering::Relaxed);
 +    let elapsed_ms = elapsed.as_millis();
  
@@ -383,6 +409,9 @@ index a85baae..f4ac8da 100644
 +            ev.insert("error".into(), json!(e.to_string()));
 +        }
 +        ev.insert("total_ms".into(), json!(elapsed.as_secs_f64() * 1e3));
++        if let Some(ms) = shadow_ms {
++            ev.insert("shadow_answer_ms".into(), json!(ms));
++        }
 +        ev.insert("inflight_at_start".into(), json!(inflight));
 +        // JSON-RPC payload sizes as the wallet sees them (what a plain RPC
 +        // would carry). PIR wire bytes are under "pir".

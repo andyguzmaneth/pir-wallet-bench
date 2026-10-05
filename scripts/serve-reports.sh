@@ -8,20 +8,12 @@ SITE=runs/_site
 PORT=${REPORT_PORT:-8790}
 BIND=${REPORT_BIND:-$(tailscale ip -4 2>/dev/null | head -1 || echo 127.0.0.1)}
 mkdir -p "$SITE"
-links=""
 for r in $(ls -1d runs/*/ 2>/dev/null | grep -v _site | sort -r); do
   id=$(basename "$r")
   [[ -f $r/report.html ]] || continue
   cp "$r/report.html" "$SITE/$id.html"
-  links+="<li><a href=\"$id.html\">$id</a></li>"
 done
-cat > "$SITE/index.html" <<HTML
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PIR wallet bench runs</title>
-<style>body{font:15px/1.6 system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;background:#f9f9f7;color:#0b0b0b}
-@media (prefers-color-scheme:dark){body{background:#0d0d0d;color:#fff}a{color:#86b6ef}}</style></head>
-<body><h1>PIR wallet bench runs</h1><ul>$links</ul></body></html>
-HTML
+python3 bench/index.py "$SITE" >/dev/null
 if ! curl -fs -m 1 "http://$BIND:$PORT/" 2>/dev/null | grep -q "PIR wallet bench runs"; then
   if ss -ltn | grep -qE ":$PORT\b"; then echo "port $PORT is taken by another server; set REPORT_PORT"; exit 1; fi
   setsid nohup python3 -m http.server "$PORT" --bind "$BIND" --directory "$SITE" >/dev/null 2>&1 < /dev/null &

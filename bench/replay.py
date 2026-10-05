@@ -76,7 +76,9 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=120)
     args = ap.parse_args()
 
-    sessions = load_trace(args.events, args.pir_only, {m for m in args.exclude.split(",") if m})
+    # Never replay writes: a replay must not broadcast transactions again.
+    never = {"eth_sendRawTransaction", "eth_sendTransaction", "eth_sendUserOperation"}
+    sessions = load_trace(args.events, args.pir_only, never | {m for m in args.exclude.split(",") if m})
     n_req = sum(len(v) for v in sessions.values())
     if not n_req:
         print("no replayable requests (was the proxy run with --record-params?)", file=sys.stderr)
