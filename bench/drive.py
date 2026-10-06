@@ -58,7 +58,10 @@ def set_session(proxy: str, name: str) -> None:
         data=json.dumps({"session": name}).encode(),
         headers={"content-type": "application/json"},
     )
-    urllib.request.urlopen(req, timeout=10).read()
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception as e:  # a proxy without /_bench/session still works; events stay untagged
+        print(f"[bench] session tag not set ({e})", file=sys.stderr)
 
 
 def expand(tail, ctx):

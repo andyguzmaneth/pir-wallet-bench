@@ -29,6 +29,8 @@ METRICS = [
     ("wallet_action_ratio_max", "Wallet action with vs without PIR, worst", "x", "lower"),
     ("proxy_lock_wait_p50_ms_at_max", "Proxy queue wait at highest load, median", "ms", "lower"),
     ("load:16", "Direct PIR lookup at 16 wallets, median", "ms", "lower"),
+    ("token_pir_requests", "Token balances served by PIR", "n", "higher"),
+    ("pir_cache_hits", "PIR answers from the proxy cache", "n", ""),
     ("requests", "Requests logged", "n", ""),
     ("pir_requests", "PIR lookups", "n", ""),
     ("sensitive_requests", "Privacy-sensitive requests", "n", ""),
@@ -55,6 +57,7 @@ def main():
         runs.append({
             "id": d.name, "started": meta.get("started_utc", s.get("started_utc", "")),
             "network": meta.get("network", "mainnet"), "label": meta.get("label", ""), "note": meta.get("note", ""),
+            "proxy": meta.get("proxy_under_test", "bench-instrumented local-pir-rpc"),
             "metrics": {k: value(s, k) for k, *_ in METRICS},
         })
     runs.sort(key=lambda r: r["started"], reverse=True)
@@ -85,7 +88,7 @@ th{color:var(--ink2);font-weight:500}.num{text-align:right;font-variant-numeric:
 <div class="pick"><label>Before <select id="a"></select></label><label>After <select id="b"></select></label></div>
 <table id="cmp"><thead><tr><th>Metric</th><th class="num">Before</th><th class="num">After</th><th class="num">Change</th></tr></thead><tbody></tbody></table>
 <p class="sub" id="cmpnote"></p></section>
-<section><h2>All runs</h2><table id="runs"><thead><tr><th>Run</th><th>Network</th><th>Label</th><th class="num">PIR lookup</th><th class="num">Sensitive served by PIR</th><th>Report</th></tr></thead><tbody></tbody></table></section>
+<section><h2>All runs</h2><table id="runs"><thead><tr><th>Run</th><th>Network</th><th>Proxy</th><th>Label</th><th class="num">PIR lookup</th><th class="num">Sensitive served by PIR</th><th>Report</th></tr></thead><tbody></tbody></table></section>
 </main>
 <script id="data" type="application/json">{{DATA}}</script>
 <script>
@@ -117,7 +120,7 @@ th{color:var(--ink2);font-weight:500}.num{text-align:right;font-variant-numeric:
   }
   a.onchange=b.onchange=draw; draw();
   var rb=document.querySelector('#runs tbody');
-  R.forEach(function(r){ var tr=document.createElement('tr'); tr.appendChild(td(r.id)); tr.appendChild(td(r.network));
+  R.forEach(function(r){ var tr=document.createElement('tr'); tr.appendChild(td(r.id)); tr.appendChild(td(r.network)); tr.appendChild(td(r.proxy||'–'));
     var l=td(r.label||'–'); if(r.note){var s=document.createElement('div');s.className='tag';s.textContent=r.note;l.appendChild(s);} tr.appendChild(l);
     tr.appendChild(td(fmt(r.metrics.pir_balance_p50_ms,'ms'),'num')); tr.appendChild(td(fmt(r.metrics.sensitive_share_pir,'pct'),'num'));
     var c=document.createElement('td'), x=document.createElement('a'); x.href=r.id+'.html'; x.textContent='open'; c.appendChild(x); tr.appendChild(c); rb.appendChild(tr); });

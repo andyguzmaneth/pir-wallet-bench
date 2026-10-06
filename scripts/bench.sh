@@ -20,6 +20,13 @@ PROXY_URL=http://127.0.0.1:$PORT
 NETWORK=${NETWORK:-mainnet}
 PROXY_EXTRA=()
 DRIVE_EXTRA=()
+# PROXY_UNDER_TEST=upstream: test an unmodified upstream local-pir-rpc. Our
+# proxy runs in front of it in pass-through mode to record each request; the
+# upstream log says which route served it (merged by bench/merge_upstream.py).
+PROXY_UNDER_TEST=${PROXY_UNDER_TEST:-bench}
+UPSTREAM_BIN=${UPSTREAM_BIN:-../upstream-forks/local-pir-rpc/target/release/local-pir-rpc}
+UPSTREAM_PORT=$((PORT + 10))
+UPSTREAM_PID=
 if [[ $NETWORK == sepolia ]]; then
   # The PIR server holds mainnet state: shadow mode keeps PIR timing but
   # answers from the Sepolia RPC. Sends use the persistent funded wallet.
@@ -48,13 +55,38 @@ start_proxy() { # $1 events file
   done
   echo "proxy did not come up"; exit 1
 }
+start_upstream() {
+  local args=(--listen "127.0.0.1:$UPSTREAM_PORT" --pir-url "$PIR_URL" --rpc-url "$ETH_RPC_URL")
+  [[ -n ${TOKEN_PIR_URL:-} ]] && args+=(--token-pir-url "$TOKEN_PIR_URL")
+  # shellcheck disable=SC2206
+  args+=(${UPSTREAM_ARGS:-})
+  "$UPSTREAM_BIN" "${args[@]}" >>"$RUN/upstream.log" 2>&1 &
+  UPSTREAM_PID=$!
+  for _ in $(seq 120); do
+    curl -fs -o /dev/null -m 2 "http://127.0.0.1:$UPSTREAM_PORT" -H 'content-type: application/json' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' && return 0
+    kill -0 "$UPSTREAM_PID" 2>/dev/null || { echo "upstream proxy exited; see $RUN/upstream.log"; exit 1; }
+    sleep 2
+  done
+  echo "upstream proxy did not come up"; exit 1
+}
+stop_upstream() {
+  if [[ -n $UPSTREAM_PID ]]; then kill "$UPSTREAM_PID" 2>/dev/null || true; wait "$UPSTREAM_PID" 2>/dev/null || true; fi
+  UPSTREAM_PID=
+}
 stop_proxy() {
   if [[ -n $PROXY_PID ]]; then kill "$PROXY_PID" 2>/dev/null || true; wait "$PROXY_PID" 2>/dev/null || true; fi
   PROXY_PID=
 }
-trap stop_proxy EXIT
+trap 'stop_proxy; stop_upstream' EXIT
+if [[ $PROXY_UNDER_TEST == upstream ]]; then
+  [[ -x $UPSTREAM_BIN ]] || { echo "missing $UPSTREAM_BIN"; exit 1; }
+  start_upstream
+  PROXY_EXTRA+=(--passthrough "http://127.0.0.1:$UPSTREAM_PORT")
+fi
+merge_upstream() { [[ $PROXY_UNDER_TEST == upstream && -f $1 ]] && python3 bench/merge_upstream.py "$1" "$RUN/upstream.log" || true; }
 
-NETWORK=$NETWORK python3 - "$RUN/meta.json" <<PY
+NETWORK=$NETWORK PROXY_UNDER_TEST=$PROXY_UNDER_TEST python3 - "$RUN/meta.json" <<PY
 import json, os, subprocess, sys, time, urllib.parse
 u = urllib.parse.urlsplit(os.environ["ETH_RPC_URL"])
 rev = lambda d: subprocess.run(["git", "-C", d, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
@@ -67,6 +99,10 @@ meta.update({
     "fallback_rpc": f"{u.scheme}://{u.hostname}",  # path/query dropped: may carry a key
     "stages": os.environ.get("STAGES", ""),
     "network": os.environ.get("NETWORK", "mainnet"),
+    "proxy_under_test": ("upstream local-pir-rpc " + rev("../upstream-forks/local-pir-rpc")
+                         + (" (clearnet)" if "--without-tor" in os.environ.get("UPSTREAM_ARGS", "") else " (Tor)")
+                         + (", token PIR" if os.environ.get("TOKEN_PIR_URL") else ""))
+                        if os.environ.get("PROXY_UNDER_TEST") == "upstream" else "bench-instrumented local-pir-rpc",
     "label": os.environ.get("RUN_LABEL", meta.get("label", "")),
     "note": os.environ.get("RUN_NOTE", meta.get("note", "")),
     "kohaku-cli": rev("vendor/kohaku-cli"), "local-pir-rpc": rev("vendor/local-pir-rpc"),
@@ -84,6 +120,7 @@ if has drive; then
   args+=("${DRIVE_EXTRA[@]}")
   python3 bench/drive.py "${args[@]}" || echo "   (some scenarios failed; see $RUN/drive/)"
   stop_proxy
+  merge_upstream "$RUN/events.jsonl"
 fi
 
 if has replay; then
@@ -92,6 +129,7 @@ if has replay; then
   python3 bench/replay.py --events "$RUN/events.jsonl" --target "$PROXY_URL" --label pir --tag-sessions \
     --concurrency "${REPLAY_CONCURRENCY:-1,4,16}" --exclude "${REPLAY_EXCLUDE:-}" --out "$RUN/replay.jsonl"
   stop_proxy
+  merge_upstream "$RUN/events-replay.jsonl"
   python3 bench/replay.py --events "$RUN/events.jsonl" --target "$ETH_RPC_URL" --label baseline \
     --concurrency "${REPLAY_CONCURRENCY:-1,4,16}" --exclude "${REPLAY_EXCLUDE:-}" --out "$RUN/replay.jsonl"
 fi

@@ -462,7 +462,10 @@ def build(run: Path):
 
     pir = [e for e in events if is_pir(e)]
     fb = [e for e in events if not is_pir(e)]
-    pir_ms = [e["total_ms"] for e in pir]
+    # Lookups answered from a proxy cache (upstream proxy, 0 ms) are not lookup cost.
+    pir_live = [e for e in pir if not e.get("cached")]
+    pir_cached = len(pir) - len(pir_live)
+    pir_ms = [e["total_ms"] for e in pir_live]
     fb_ms = [e["total_ms"] for e in fb]
     t_pir, t_fb = sum(pir_ms), sum(fb_ms)
     heads = [e["head_block"] for e in events if "head_block" in e]
@@ -532,18 +535,20 @@ def build(run: Path):
     rrpc = [r for r in replay if r.get("kind") == "rpc"]
     base_c = min((r["concurrency"] for r in rrpc if r["label"] == "baseline"), default=None)
     base = [r for r in rrpc if r["label"] == "baseline" and r["concurrency"] == base_c and r["ok"]]
-    pir_methods = sorted({e["method"] for e in pir})
+    def req_kind(method, route):
+        return "token balanceOf" if route == "TokenBalance" else method
+    pir_methods = sorted({req_kind(e["method"], e["route"]) for e in pir_live})
     lat_rows, lat_bars = [], []
     for m in pir_methods:
-        a = [e["total_ms"] for e in pir if e["method"] == m]
-        b = [r["total_ms"] for r in base if r["method"] == m]
+        a = [e["total_ms"] for e in pir_live if req_kind(e["method"], e["route"]) == m]
+        b = [r["total_ms"] for r in base if req_kind(r["method"], r.get("orig_route")) == m]
         if not b:  # no replay yet: public RPC latency of the other requests is the reference
             b = fb_ms
         lat_rows.append([m, len(a), fmt_ms(pct(a, .5)), fmt_ms(pct(a, .95)), len(b), fmt_ms(pct(b, .5)),
                          fmt_ms(pct(b, .95)), f"{pct(a, .5) / pct(b, .5):.0f}×" if b else "–"])
         lat_bars += [(f"{m} · PIR", [pct(a, .5), 0], f"p95 {fmt_ms(pct(a, .95))}, n={len(a)}"),
                      (f"{m} · public RPC", [0, pct(b, .5)], f"p95 {fmt_ms(pct(b, .95))}, n={len(b)}")]
-    bal_pir = pct([e["total_ms"] for e in pir if e["method"] == "eth_getBalance"], .5)
+    bal_pir = pct([e["total_ms"] for e in pir_live if e["method"] == "eth_getBalance"], .5)
     bal_pub = pct([r["total_ms"] for r in base if r["method"] == "eth_getBalance"], .5) or pct(fb_ms, .5)
 
     # Replay: whole wallet actions
@@ -763,11 +768,13 @@ def build(run: Path):
            if base else "no replay yet: the public RPC reference is all other requests in the drive")
     lat_groups = []
     for m in pir_methods:
-        a = [e["total_ms"] for e in pir if e["method"] == m]
-        b = [r["total_ms"] for r in base if r["method"] == m] or fb_ms
+        a = [e["total_ms"] for e in pir_live if req_kind(e["method"], e["route"]) == m]
+        b = [r["total_ms"] for r in base if req_kind(r["method"], r.get("orig_route")) == m] or fb_ms
         lat_groups.append((m, [pct(a, .5), pct(b, .5)], [f"p95 {fmt_ms(pct(a, .95))}, n={len(a)}", f"p95 {fmt_ms(pct(b, .95))}, n={len(b)}"]))
     parts.append('<section id="latency"><h2>Per-request latency: PIR vs public RPC</h2>'
-                 f'<p class="sub">Median time for the same request type over each route; {esc(src)}.</p>'
+                 f'<p class="sub">Median time for the same request type over each route; {esc(src)}.'
+                 + (f' {pir_cached} of {len(pir)} PIR answers came from the proxy cache (0 ms) and are left out.'
+                    if pir_cached else "") + '</p>'
                  + legend([("PIR", C[0]), ("Public RPC", C[1])])
                  + grouped_hbar(lat_groups, ["PIR", "Public RPC"], fmt_ms)
                  + table(["Request", "PIR n", "PIR p50", "PIR p95", "Public n", "Public p50", "Public p95", "PIR / public"], lat_rows)
@@ -924,6 +931,7 @@ def build(run: Path):
         f'<tr><td>{esc(k)}</td><td><a href="https://github.com/{REPOS[k]}/commit/{esc(v)}">{esc(v)}</a></td></tr>'
         for k, v in meta.items() if k in REPOS)
     run_rows = [["Started (UTC)", meta.get("started_utc", "–")], ["Machine", meta.get("host", "–")],
+                ["Proxy under test", meta.get("proxy_under_test", "bench-instrumented local-pir-rpc")],
                 ["PIR server", meta.get("pir_url", "–")], ["Public RPC", meta.get("fallback_rpc", "–")],
                 ["Requests logged", len(events)], ["Chain head (last seen)", heads[-1] if heads else "–"],
                 ["PIR snapshot blocks seen", f"{min(snaps)}–{max(snaps)}" if snaps else "–"]]
@@ -949,6 +957,9 @@ def build(run: Path):
         "direct_load_p50_ms": {str(c): pct(by_c[c], .5) for c in load_levels},
         "proxy_lock_wait_p50_ms_at_max": proxy_hi[3] if proxy_hi else None,
         "pir_methods": dict(Counter(e["method"] for e in pir)),
+        "pir_cache_hits": pir_cached,
+        "token_pir_requests": sum(1 for e in pir if e["route"] == "TokenBalance"),
+        "proxy_under_test": meta.get("proxy_under_test", ""),
     })
     nav_html = "".join(f'<a href="#{i}">{esc(t)}</a>' for i, t in nav if f'id="{i}"' in "".join(parts))
     parts.insert(0, f'<nav id="toc">{nav_html}</nav>')
