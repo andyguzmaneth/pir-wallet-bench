@@ -57,10 +57,16 @@ start_proxy() { # $1 events file
 }
 start_upstream() {
   local args=(--listen "127.0.0.1:$UPSTREAM_PORT" --pir-url "$PIR_URL" --rpc-url "$ETH_RPC_URL")
-  [[ -n ${TOKEN_PIR_URL:-} ]] && args+=(--token-pir-url "$TOKEN_PIR_URL")
+  # Older builds take --token-pir-url; newer ones derive tokens/names from --pir-url (port+1, port+2).
+  if [[ -n ${TOKEN_PIR_URL:-} ]] && "$UPSTREAM_BIN" --help 2>&1 | grep -q -- --token-pir-url; then
+    args+=(--token-pir-url "$TOKEN_PIR_URL")
+  fi
   # shellcheck disable=SC2206
   args+=(${UPSTREAM_ARGS:-})
-  "$UPSTREAM_BIN" "${args[@]}" >>"$RUN/upstream.log" 2>&1 &
+  # Own Tor (Arti) state per run: other Tor users on this machine hold locks on the shared one.
+  local xdg="$ROOT/$RUN/xdg"; mkdir -p "$xdg"/{data,cache,state,config}
+  XDG_DATA_HOME="$xdg/data" XDG_CACHE_HOME="$xdg/cache" XDG_STATE_HOME="$xdg/state" XDG_CONFIG_HOME="$xdg/config" \
+    "$UPSTREAM_BIN" "${args[@]}" >>"$RUN/upstream.log" 2>&1 &
   UPSTREAM_PID=$!
   for _ in $(seq 120); do
     curl -fs -o /dev/null -m 2 "http://127.0.0.1:$UPSTREAM_PORT" -H 'content-type: application/json' \
@@ -101,7 +107,8 @@ meta.update({
     "network": os.environ.get("NETWORK", "mainnet"),
     "proxy_under_test": ("upstream local-pir-rpc " + rev("../upstream-forks/local-pir-rpc")
                          + (" (clearnet)" if "--without-tor" in os.environ.get("UPSTREAM_ARGS", "") else " (Tor)")
-                         + (", token PIR" if os.environ.get("TOKEN_PIR_URL") else ""))
+                         + (", token PIR" if os.environ.get("TOKEN_PIR_URL") else "")
+                         + (" " + os.environ["UPSTREAM_NOTE"] if os.environ.get("UPSTREAM_NOTE") else ""))
                         if os.environ.get("PROXY_UNDER_TEST") == "upstream" else "bench-instrumented local-pir-rpc",
     "label": os.environ.get("RUN_LABEL", meta.get("label", "")),
     "note": os.environ.get("RUN_NOTE", meta.get("note", "")),

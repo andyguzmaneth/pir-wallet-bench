@@ -492,9 +492,11 @@ def build(run: Path):
         call = e.get("call") or {}
         kind = call.get("fn_kind") or call.get("to_kind") or ""
         fn = (call.get("fn") or "").split("(")[0]
+        if is_pir(e):
+            return "your address"
         if kind in INSENSITIVE_KINDS:
             return ""
-        if is_pir(e) or exposes(e):
+        if exposes(e):
             return "your address"
         if fn in SENSITIVE_FNS:
             return "a specific note"
@@ -536,7 +538,8 @@ def build(run: Path):
     base_c = min((r["concurrency"] for r in rrpc if r["label"] == "baseline"), default=None)
     base = [r for r in rrpc if r["label"] == "baseline" and r["concurrency"] == base_c and r["ok"]]
     def req_kind(method, route):
-        return "token balanceOf" if route == "TokenBalance" else method
+        return {"TokenBalance": "token balanceOf", "Names": "name lookup",
+                "AccountCode": "eth_getCode (7702 delegate)"}.get(route, method)
     pir_methods = sorted({req_kind(e["method"], e["route"]) for e in pir_live})
     lat_rows, lat_bars = [], []
     for m in pir_methods:
